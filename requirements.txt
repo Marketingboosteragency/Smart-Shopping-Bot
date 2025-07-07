@@ -1,0 +1,6 @@
+Flask
+requests
+fake-useragent
+google-cloud-vision
+firebase-admin
+gunicorn
