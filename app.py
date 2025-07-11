@@ -1,8 +1,11 @@
-# app.py (versión 6.1 - Rutas Restauradas)
+# app.py (versión 6.2 - Optimizada para Render)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 6.1 (Routes Restored & Full Functionality)
+# Versión: 6.2 (Optimized for Render Environment)
+# Novedades:
+# - Se ha reducido el número de resultados a procesar y el paralelismo del scraping
+#   para mejorar la estabilidad y evitar crashes por consumo de memoria/timeout.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -192,13 +195,16 @@ class SmartShoppingBot:
         return best_deals, suggestions
 
     def search_with_ai_verification(self, search_query: str) -> List[ProductResult]:
-        params = {"q": search_query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "num": "30", "api_key": self.serpapi_key}
+        # GÉNESIS: Reducimos el número de resultados a procesar para que sea más rápido y ligero.
+        params = {"q": search_query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "num": "20", "api_key": self.serpapi_key}
         try:
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=45)
             response.raise_for_status()
             organic_results = response.json().get('organic_results', [])
             results_with_scores = []
-            with ThreadPoolExecutor(max_workers=10) as executor:
+            
+            # GÉNESIS: Reducimos el número de trabajadores paralelos para evitar crashes de memoria.
+            with ThreadPoolExecutor(max_workers=4) as executor:
                 future_to_item = {executor.submit(_deep_scrape_content, item.get('link')): item for item in organic_results if item.get('link')}
                 for future in as_completed(future_to_item):
                     item = future_to_item[future]
@@ -210,7 +216,9 @@ class SmartShoppingBot:
                             if relevance_score >= 5:
                                 results_with_scores.append({'store': _get_clean_company_name(item), 'product_name': item.get('title', 'Sin título'), 'price_float': price_float, 'url': item.get('link'), 'image_url': content['image'] or item.get('thumbnail', ''), 'relevance_score': relevance_score})
                         except (ValueError, TypeError): continue
+            
             if not results_with_scores: return []
+            
             results_with_scores.sort(key=lambda x: (-x['relevance_score'], x['price_float']))
             final_results_obj = [ProductResult(name=res['product_name'], price=res['price_float'], store=res['store'], url=res['url'], image_url=res.get('image_url', ''), relevance_score=res['relevance_score']) for res in results_with_scores]
             return final_results_obj[:30]
@@ -222,7 +230,6 @@ class SmartShoppingBot:
 # ==============================================================================
 shopping_bot = SmartShoppingBot(SERPAPI_KEY)
 
-## GÉNESIS: RUTAS PRINCIPALES RESTAURADAS ##
 @app.route('/')
 def index():
     if 'user_id' in session: return redirect(url_for('main_app_page'))
@@ -268,7 +275,6 @@ def api_search():
 # ==============================================================================
 # SECCIÓN 4: PLANTILLAS HTML Y EJECUCIÓN
 # ==============================================================================
-
 AUTH_TEMPLATE_LOGIN_ONLY = """
 <!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Acceso | Smart Shopping Bot</title><link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet"><style>:root{--primary-color:#4A90E2;--secondary-color:#50E3C2;--text-color-dark:#2C3E50;--card-bg:#FFFFFF;--shadow-medium:rgba(0,0,0,0.15)}body{font-family:'Poppins',sans-serif;background:linear-gradient(135deg,var(--primary-color) 0%,var(--secondary-color) 100%);min-height:100vh;display:flex;justify-content:center;align-items:center;padding:20px}.auth-container{max-width:480px;width:100%;background:var(--card-bg);border-radius:20px;box-shadow:0 25px 50px var(--shadow-medium);overflow:hidden;animation:fadeIn .8s ease-out}@keyframes fadeIn{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}.form-header{text-align:center;padding:40px 30px 20px}.form-header h1{color:var(--text-color-dark);font-size:2em;margin-bottom:10px}.form-header p{color:#7f8c8d;font-size:1.1em}.form-body{padding:10px 40px 40px}form{display:flex;flex-direction:column;gap:20px}.input-group{display:flex;flex-direction:column;gap:8px}.input-group label{font-weight:600;color:var(--text-color-dark);font-size:.95em}.input-group input{padding:16px 20px;border:2px solid #e0e0e0;border-radius:12px;font-size:16px;transition:all .3s ease}.input-group input:focus{outline:0;border-color:var(--primary-color);box-shadow:0 0 0 4px rgba(74,144,226,.2)}.submit-btn{background:linear-gradient(45deg,var(--primary-color),#2980b9);color:#fff;border:none;padding:16px 30px;font-size:1.1em;font-weight:600;border-radius:12px;cursor:pointer;transition:all .3s ease;margin-top:15px}.submit-btn:hover{transform:translateY(-3px);box-shadow:0 12px 25px rgba(0,0,0,.2)}.flash-messages{list-style:none;padding:0 40px 20px}.flash{padding:15px;margin-bottom:15px;border-radius:8px;text-align:center}.flash.success{background-color:#d4edda;color:#155724}.flash.danger{background-color:#f8d7da;color:#721c24}.flash.warning{background-color:#fff3cd;color:#856404}</style></head><body><div class="auth-container"><div class="form-header"><h1>Bienvenido de Nuevo</h1><p>Accede para encontrar las mejores ofertas.</p></div>{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<ul class=flash-messages>{% for category, message in messages %}<li class="flash {{ category }}">{{ message }}</li>{% endfor %}</ul>{% endif %}{% endwith %}<div class="form-body"><form id="login-form" action="{{ url_for('login') }}" method="post"><div class="input-group"><label for="login-email">Correo</label><input type="email" name="email" required></div><div class="input-group"><label for="login-password">Contraseña</label><input type="password" name="password" required></div><button type="submit" class="submit-btn">Entrar</button></form></div></div></body></html>
