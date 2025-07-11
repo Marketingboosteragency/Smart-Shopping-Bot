@@ -1,9 +1,7 @@
-Flask
-requests
-fake-useragent
-google-cloud-vision
-gunicorn
-# --- NUEVAS LIBRERÍAS PARA LA BÚSQUEDA AVANZADA ---
-beautifulsoup4
-google-generativeai
-# statistics es parte de Python, no necesita instalarse.
+Flask==3.0.3
+requests==2.32.3
+fake-useragent==1.5.1
+google-cloud-vision==3.7.2
+gunicorn==22.0.0
+beautifulsoup4==4.12.3
+google-generativeai==0.7.1
