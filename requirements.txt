@@ -2,5 +2,8 @@ Flask
 requests
 fake-useragent
 google-cloud-vision
-firebase-admin
 gunicorn
+# --- NUEVAS LIBRERÍAS PARA LA BÚSQUEDA AVANZADA ---
+beautifulsoup4
+google-generativeai
+# statistics es parte de Python, no necesita instalarse.
