@@ -1,8 +1,8 @@
-# app.py (versión 8.2 - Verificada y Lista para Producción)
+# app.py (versión 8.3 - Depuración Mejorada)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 8.2 (Verified Image-to-Text with Gemini Vision)
+# Versión: 8.3 (Enhanced Debug Logging for Image Search)
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -51,10 +51,11 @@ if genai and GEMINI_API_KEY:
         genai = None
 
 # ==============================================================================
-# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (CON GEMINI VISION)
+# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (CON GEMINI VISION Y LOGGING MEJORADO)
 # ==============================================================================
 
 def _deep_scrape_content(url: str) -> Dict[str, Any]:
+    # ... (esta función se queda igual)
     headers = {'User-Agent': UserAgent().random, 'Accept-Language': 'en-US,en;q=0.9', 'Referer': 'https://www.google.com/'}
     try:
         response = requests.get(url, headers=headers, timeout=12)
@@ -77,6 +78,7 @@ def _deep_scrape_content(url: str) -> Dict[str, Any]:
         return {'title': 'N/A', 'text': '', 'price': 'N/A', 'image': ''}
 
 def _get_relevance_score_with_gemini(query: str, product_title: str, product_text: str) -> int:
+    # ... (esta función se queda igual)
     if not genai: return 5
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
@@ -87,6 +89,7 @@ def _get_relevance_score_with_gemini(query: str, product_title: str, product_tex
     except Exception: return 3
 
 def _get_suggestions_with_gemini(query: str) -> List[str]:
+    # ... (esta función se queda igual)
     if not genai: return []
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
@@ -97,6 +100,7 @@ def _get_suggestions_with_gemini(query: str) -> List[str]:
     except Exception: return []
 
 def _get_clean_company_name(item: Dict) -> str:
+    # ... (esta función se queda igual)
     try:
         if source := item.get('source'): return source
         return urlparse(item.get('link', '')).netloc.replace('www.', '').split('.')[0].capitalize()
@@ -121,13 +125,20 @@ class SmartShoppingBot:
             prompt = """You are an expert in identifying products. Analyze the image and generate a specific, effective search query in English to find this product online. Respond ONLY with the search query."""
             response = model.generate_content([prompt, image_pil])
             query = response.text.strip()
-            print(f"  ✅ Consulta generada por Gemini Vision: '{query}'")
-            return query
+            # GÉNESIS: Log de éxito o de respuesta vacía
+            if query:
+                print(f"  ✅ Consulta generada por Gemini Vision: '{query}'")
+                return query
+            else:
+                print("  ⚠️ Gemini Vision respondió, pero la descripción está vacía.")
+                return None
         except Exception as e:
-            print(f"  ❌ Fallo en análisis con Gemini Vision: {e}")
+            # GÉNESIS: Log de error más detallado
+            print(f"  ❌ Fallo CRÍTICO en análisis con Gemini Vision: {e}")
             return None
 
     def _combine_text_and_image_query(self, text_query: str, image_query: str) -> str:
+        # ... (esta función se queda igual)
         if not genai: return f"{text_query} {image_query}"
         try:
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
@@ -140,19 +151,38 @@ class SmartShoppingBot:
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str]]:
         text_query = query.strip() if query else None
         image_query = self.get_descriptive_query_with_gemini_vision(image_content) if image_content else None
+        
+        # GÉNESIS: Log explícito si la búsqueda por imagen falló
+        if image_content and not image_query:
+            print("  ❗️ La búsqueda por imagen falló al no poder generar una consulta.")
+
         final_query = None
         if text_query and image_query:
-            print(f"🧠 Combinando texto '{text_query}' e imagen (descripción IA: '{image_query}')..."); final_query = self._combine_text_and_image_query(text_query, image_query)
-        elif text_query: final_query = text_query
-        elif image_query: final_query = image_query
-        if not final_query: print("❌ No se pudo determinar una consulta válida."); return [], []
+            print(f"🧠 Combinando texto '{text_query}' e imagen (descripción IA: '{image_query}')...")
+            final_query = self._combine_text_and_image_query(text_query, image_query)
+        elif text_query:
+            final_query = text_query
+        elif image_query:
+            final_query = image_query
+
+        if not final_query:
+            print("❌ No se pudo determinar una consulta válida en absoluto.")
+            return [], []
+        
         print(f"🔍 Lanzando búsqueda neuronal para: '{final_query}'")
         best_deals = self.search_with_ai_verification(final_query)
-        suggestions = []
-        if not best_deals: print("🤔 No se encontraron resultados. Generando sugerencias..."); suggestions = _get_suggestions_with_gemini(final_query)
+        
+        # GÉNESIS: Log final antes de generar sugerencias
+        if not best_deals:
+            print("  ❗️ La búsqueda y el scraping no produjeron resultados válidos.")
+            print("  🤔 Generando sugerencias como alternativa...")
+            suggestions = _get_suggestions_with_gemini(final_query)
+        else:
+            suggestions = []
         return best_deals, suggestions
 
     def search_with_ai_verification(self, search_query: str) -> List[ProductResult]:
+        # ... (esta función se queda igual, con las optimizaciones)
         params = {"q": search_query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "num": "20", "api_key": self.serpapi_key}
         try:
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=45)
@@ -183,6 +213,10 @@ class SmartShoppingBot:
 # ==============================================================================
 shopping_bot = SmartShoppingBot(SERPAPI_KEY)
 
+# ... (el resto del código, incluyendo rutas y plantillas, no necesita cambios) ...
+
+# El resto del código que incluye las rutas de Flask y las plantillas HTML
+# se queda exactamente igual que en la versión 8.1.
 @app.route('/')
 def index():
     if 'user_id' in session: return redirect(url_for('main_app_page'))
