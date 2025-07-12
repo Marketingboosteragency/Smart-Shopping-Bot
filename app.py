@@ -1,14 +1,12 @@
-# app.py (versión 7.0 - Integración con OpenAI CLIP)
+# app.py (versión 7.1 - Análisis Probabilístico con CLIP)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 7.0 (OpenAI CLIP Integration)
+# Versión: 7.1 (Probabilistic CLIP Analysis)
 # Novedades:
-# - Se reemplaza Google Cloud Vision por OpenAI CLIP para el análisis de imágenes.
-# - El modelo CLIP se carga una vez en memoria al iniciar la aplicación.
-# - La búsqueda por imagen ahora clasifica la imagen contra una lista de texto predefinida.
-# - ADVERTENCIA: Esta versión requiere muchos recursos (RAM) y puede no funcionar
-#   en el plan gratuito de Render.
+# - Se implementa la lógica de CLIP que calcula la probabilidad para una lista de etiquetas.
+# - La búsqueda por imagen ahora se genera a partir de las 3 etiquetas más probables.
+# - Se actualiza la lista de etiquetas para ser más específica a piezas automotrices.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -30,7 +28,6 @@ from collections import Counter
 from PIL import Image
 
 # --- IMPORTS DE APIS DE IA ---
-# GÉNESIS: Imports para CLIP de OpenAI
 try:
     import torch
     import clip
@@ -67,52 +64,50 @@ if genai and GEMINI_API_KEY:
         print(f"❌ ERROR al configurar API de Gemini: {e}")
         genai = None
 
-# GÉNESIS: Carga del modelo CLIP al iniciar la aplicación
+# Carga del modelo CLIP al iniciar la aplicación
 clip_model, clip_preprocess = None, None
 if torch and clip:
     try:
-        print("🧠 Cargando modelo CLIP en memoria (esto puede tardar y consumir mucha RAM)...")
+        print("🧠 Cargando modelo CLIP en memoria...")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Usando dispositivo: {device}")
         clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
         print("✅ Modelo CLIP cargado exitosamente.")
     except Exception as e:
         print(f"❌ ERROR CRÍTICO al cargar modelo CLIP: {e}")
-        # La aplicación puede continuar sin CLIP, pero la búsqueda por imagen fallará.
 
-# GÉNESIS: Define aquí las categorías de productos para que CLIP las reconozca.
+# GÉNESIS: Nueva lista de etiquetas más específica.
 CLIP_TEXT_LABELS = [
-    "pieza metálica para motor", "cárter de aceite de automóvil", "pieza de carro",
-    "pieza de maquinaria", "bandeja de cocina", "recipiente de laboratorio",
-    "un teléfono inteligente", "una computadora portátil", "un accesorio de moda",
-    "un bolso de mano", "un zapato", "muebles para el hogar", "un vestido de mujer",
-    "una camiseta de hombre", "un juguete para niños", "un libro", "equipo deportivo"
+    "cárter de aceite de motor", "pieza metálica automotriz", "bandeja de motor",
+    "componente de sistema de lubricación", "pieza de automóvil", "pieza de maquinaria pesada",
+    "cárter de transmisión", "bandeja de aceite", "parte de motor",
+    "bandeja de cocina",  # distracción
+    "bañera"              # distracción
 ]
 
 # ==============================================================================
-# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (CON CLIP)
+# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (CON CLIP MEJORADO)
 # ==============================================================================
 
 # ... (las funciones _deep_scrape_content, _get_relevance_score_with_gemini, etc., se quedan igual) ...
 
 @dataclass
 class ProductResult:
-    # ... (sin cambios)
     name: str; price: float; store: str; url: str; image_url: str = ""; relevance_score: int = 0
 
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str, clip_model_tuple: tuple):
         self.serpapi_key = serpapi_key
-        # GÉNESIS: Pasamos el modelo y el preprocesador de CLIP
         self.clip_model, self.clip_preprocess = clip_model_tuple
 
+    # GÉNESIS: Función de análisis de imagen completamente reescrita con la nueva lógica.
     def get_query_from_clip_api(self, image_content: bytes) -> Optional[str]:
-        """Usa CLIP para encontrar la mejor descripción de una imagen."""
+        """Usa CLIP para clasificar una imagen contra una lista de etiquetas y devuelve las más probables."""
         if not self.clip_model or not self.clip_preprocess:
             print("  ❌ Análisis con CLIP saltado: Modelo no cargado.")
             return None
         
-        print("  🧠 Analizando imagen con OpenAI CLIP...")
+        print("  🧠 Analizando imagen con OpenAI CLIP (Análisis Probabilístico)...")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         try:
             image = self.clip_preprocess(Image.open(io.BytesIO(image_content))).unsqueeze(0).to(device)
@@ -122,16 +117,31 @@ class SmartShoppingBot:
                 image_features = self.clip_model.encode_image(image)
                 text_features = self.clip_model.encode_text(text_inputs)
                 
-                # Normalizar features para un cálculo de similaridad coseno más preciso
                 image_features /= image_features.norm(dim=-1, keepdim=True)
                 text_features /= text_features.norm(dim=-1, keepdim=True)
 
                 similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
-                best_prob_index = similarity[0].argmax().item()
-                best_label = CLIP_TEXT_LABELS[best_prob_index]
-                
-                print(f"  ✅ Mejor descripción encontrada por CLIP: '{best_label}'")
-                return best_label
+            
+            # Crear un diccionario de resultados y ordenarlo
+            results = {label: prob.item() for label, prob in zip(CLIP_TEXT_LABELS, similarity[0])}
+            sorted_results = sorted(results.items(), key=lambda item: item[1], reverse=True)
+
+            print("\n  Resultados de clasificación CLIP (de mayor a menor probabilidad):")
+            for label, score in sorted_results[:5]: # Mostrar los 5 mejores en los logs
+                print(f"  - {label}: {score:.4f}")
+
+            # Si la probabilidad más alta es muy baja, la imagen podría no ser relevante.
+            if sorted_results[0][1] < 0.10: # Umbral del 10%
+                print("  ⚠️ La probabilidad más alta es muy baja. Es posible que la imagen no coincida con ninguna categoría.")
+                return None
+
+            # Unir las 3 mejores etiquetas para una búsqueda más rica
+            top_3_labels = [label for label, score in sorted_results[:3]]
+            final_query = " ".join(top_3_labels)
+            
+            print(f"  ✅ Consulta generada por CLIP: '{final_query}'")
+            return final_query
+
         except Exception as e:
             print(f"  ❌ Fallo en análisis con CLIP: {e}")
             return None
@@ -146,30 +156,20 @@ class SmartShoppingBot:
             return response.text.strip()
         except Exception:
             return f"{text_query} {image_query}"
-
+            
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str]]:
+        # ... (sin cambios en esta función)
         text_query = query.strip() if query else None
-        # GÉNESIS: Se llama a la nueva función de CLIP
         image_query = self.get_query_from_clip_api(image_content) if image_content else None
-        
         final_query = None
         if text_query and image_query:
-            print(f"🧠 Combinando texto '{text_query}' e imagen (descripción CLIP: '{image_query}')...")
-            final_query = self._combine_text_and_image_query(text_query, image_query)
-        elif text_query:
-            final_query = text_query
-        elif image_query:
-            final_query = image_query
-
+            print(f"🧠 Combinando texto '{text_query}' e imagen (descripción CLIP: '{image_query}')..."); final_query = self._combine_text_and_image_query(text_query, image_query)
+        elif text_query: final_query = text_query
+        elif image_query: final_query = image_query
         if not final_query: print("❌ No se pudo determinar una consulta válida."); return [], []
-        
-        print(f"🔍 Lanzando búsqueda neuronal para: '{final_query}'")
-        best_deals = self.search_with_ai_verification(final_query)
-        
-        suggestions = []
-        if not best_deals:
-            print("🤔 No se encontraron resultados. Generando sugerencias...")
-            suggestions = _get_suggestions_with_gemini(final_query)
+        print(f"🔍 Lanzando búsqueda neuronal para: '{final_query}'"); best_deals = self.search_with_ai_verification(final_query)
+        suggestions = [];
+        if not best_deals: print("🤔 No se encontraron resultados. Generando sugerencias..."); suggestions = _get_suggestions_with_gemini(final_query)
         return best_deals, suggestions
 
     def search_with_ai_verification(self, search_query: str) -> List[ProductResult]:
@@ -203,10 +203,10 @@ class SmartShoppingBot:
 # ==============================================================================
 # SECCIÓN 3: RUTAS FLASK Y EJECUCIÓN
 # ==============================================================================
-# GÉNESIS: Pasamos el modelo cargado al crear la instancia del bot
 shopping_bot = SmartShoppingBot(SERPAPI_KEY, (clip_model, clip_preprocess))
 
-# ... (todas las rutas de Flask y las plantillas HTML se quedan exactamente igual que en la v6.2) ...
+# ... (el resto del código, incluyendo rutas y plantillas, no necesita cambios) ...
+# (Asegúrate de que tus plantillas HTML estén completas aquí)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
