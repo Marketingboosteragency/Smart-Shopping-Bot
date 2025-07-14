@@ -1,12 +1,11 @@
-# app.py (versión 13.0 - Análisis de Imagen por Experto IA)
+# app.py (versión 14.0 - Análisis de Imagen Experto y Filtro de Precio)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 13.0 (Expert Image Analysis with Gemini Vision)
+# Versión: 14.0 (Expert Image Analysis & Price Filter)
 # Novedades:
-# - Se rediseña el análisis de imagen: Gemini Vision ahora describe la imagen directamente.
-# - Se elimina la dependencia de google-cloud-vision, simplificando el código.
-# - La IA actúa como un "experto dual" para identificar tanto piezas como tecnología.
+# - Se rediseña el análisis de imagen: Gemini Vision describe la imagen directamente.
+# - Se elimina la dependencia de google-cloud-vision.
 # - Se añade un filtro para descartar productos con precio inferior a $0.99.
 # ==============================================================================
 
@@ -86,8 +85,7 @@ def _get_product_category(query: str) -> str:
     if not genai: return "consumer_tech"
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = (f"Classify the following product search query. Is it for 'industrial_parts' (machinery, car parts, tools, components) or 'consumer_tech' (phones, laptops, electronics, gadgets)? "
-                  f"Query: '{query}'. Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
+        prompt = (f"Classify the following product search query. Is it for 'industrial_parts' or 'consumer_tech'? Query: '{query}'. Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
         response = model.generate_content(prompt)
         category = response.text.strip()
         return category if category in ["industrial_parts", "consumer_tech"] else "consumer_tech"
@@ -96,7 +94,7 @@ def _get_product_category(query: str) -> str:
 
 def _verify_is_product_page(query: str, page_title: str, page_content: str, category: str) -> bool:
     if not genai: return True
-    prompt_template = (f"You are a product verification analyst. The user is searching for '{query}'. I found a webpage titled '{page_title}'. Is this a retail page for the main product, not an accessory or article? Answer YES or NO.")
+    prompt_template = (f"You are a verification analyst. User search: '{query}'. Page title: '{page_title}'. Is this a retail page for the main product, not an accessory or article? Answer YES or NO.")
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         response = model.generate_content(prompt_template)
@@ -127,6 +125,7 @@ class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
 
+    # GÉNESIS: Nueva función experta con Gemini Vision
     def get_descriptive_query_from_image(self, image_content: bytes) -> Optional[str]:
         if not genai:
             print("  ❌ Análisis con Gemini Vision saltado: Modelo no configurado.")
@@ -138,7 +137,7 @@ class SmartShoppingBot:
             prompt = """You are an expert in identifying both industrial/automotive parts and consumer technology products.
             Analyze the following image in detail. Identify the main object, its likely material, color, potential brand, and any unique features.
             Based on your analysis, generate a single, highly effective, and specific search query in English to find this product for sale online.
-            For industrial parts, be very specific about the type of part (e.g., 'engine oil pan', 'brake caliper').
+            For industrial parts, be very specific (e.g., 'aluminum engine oil pan').
             For consumer tech, include the model name if recognizable.
             Respond ONLY with the search query itself, nothing else."""
             response = model.generate_content([prompt, image_pil])
@@ -153,7 +152,7 @@ class SmartShoppingBot:
         if not genai: return f"{text_query} {image_query}"
         try:
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            prompt = f"Combine these into a single, effective search query. User's text: '{text_query}'. Description from image: '{image_query}'. Respond only with the final search query."
+            prompt = f"Combine these into a single, effective search query. User's text: '{text_query}'. Description from image: '{image_query}'. Respond only with the final query."
             response = model.generate_content(prompt)
             return response.text.strip()
         except Exception: return f"{text_query} {image_query}"
@@ -170,7 +169,8 @@ class SmartShoppingBot:
                     try:
                         price_str = item.get('extracted_price', item['price'])
                         price_float = float(re.sub(r'[^\d.]', '', str(price_str)))
-                        if price_float >= 0.99: # GÉNESIS: Filtro de precio mínimo
+                        # GÉNESIS: Aplicamos filtro de precio mínimo
+                        if price_float >= 0.99:
                             products.append(ProductResult(name=item['title'], price=price_float, store=item.get('source', 'Google'), url=item['link'], image_url=item.get('thumbnail', '')))
                     except (ValueError, TypeError): continue
             print(f"✅ Google Shopping encontró {len(products)} resultados válidos.")
@@ -198,7 +198,8 @@ class SmartShoppingBot:
                         if _verify_is_product_page(query, content['title'], content['text'], category):
                             try:
                                 price_float = float(content['price'])
-                                if price_float >= 0.99: # GÉNESIS: Filtro de precio mínimo
+                                # GÉNESIS: Aplicamos filtro de precio mínimo
+                                if price_float >= 0.99:
                                     valid_results.append(ProductResult(name=content['title'], price=price_float, store=_get_clean_company_name(item), url=item.get('link'), image_url=content['image'] or item.get('thumbnail', '')))
                             except (ValueError, TypeError): continue
             return valid_results
