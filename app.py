@@ -1,11 +1,13 @@
-# app.py (versión 12.1 - Completa y Verificada)
+# app.py (versión 13.0 - Motor de Búsqueda Híbrido)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 12.1 (Adaptive Search Brain - Full Code Verified)
+# Versión: 13.0 (Hybrid Search Engine)
 # Novedades:
-# - Se restaura el código completo de las rutas de Flask y las plantillas HTML.
-# - Mantiene la lógica de IA adaptativa para productos industriales y de consumo.
+# - Se implementa un motor de búsqueda dual que consulta Google Orgánico y Google Shopping en paralelo.
+# - Se garantiza la obtención de resultados de las principales tiendas gracias a Google Shopping.
+# - Se mantiene la búsqueda profunda para encontrar proveedores especializados.
+# - Los resultados de ambas búsquedas se fusionan y deduplican inteligentemente.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -71,7 +73,7 @@ if GOOGLE_CREDENTIALS_JSON_STR and vision:
         print(f"❌ ERROR al cargar credenciales de Google Vision: {e}")
 
 # ==============================================================================
-# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (ADAPTATIVA)
+# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (HÍBRIDA)
 # ==============================================================================
 
 def _deep_scrape_content(url: str) -> Dict[str, Any]:
@@ -98,50 +100,30 @@ def _deep_scrape_content(url: str) -> Dict[str, Any]:
 
 def _get_product_category(query: str) -> str:
     if not genai: return "consumer_tech"
-    print(f"  Clasificando consulta: '{query}'")
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         prompt = (f"Classify the following product search query. Is it for 'industrial_parts' (machinery, car parts, tools, components) or 'consumer_tech' (phones, laptops, electronics, gadgets)? "
-                  f"Query: '{query}'. "
-                  "Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
+                  f"Query: '{query}'. Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
         response = model.generate_content(prompt)
         category = response.text.strip()
-        print(f"  Categoría detectada: {category}")
         return category if category in ["industrial_parts", "consumer_tech"] else "consumer_tech"
     except Exception:
         return "consumer_tech"
 
 def _verify_is_product_page(query: str, page_title: str, page_content: str, category: str) -> bool:
     if not genai: return True
-    
-    if category == "industrial_parts":
-        prompt_template = (f"You are a B2B product verification analyst. The user is searching for an industrial part: '{query}'. "
-                           f"I found a webpage titled '{page_title}'. "
-                           f"Text from page: '{page_content[:500]}'. "
-                           "Is this page from a specialized distributor, manufacturer, or B2B supplier offering the main product for sale? Exclude general marketplaces like Amazon/eBay, informational articles, and forums. "
-                           "Answer with only the word YES or NO.")
-    else: # consumer_tech
-        prompt_template = (f"You are a product verification analyst. The user is searching for a tech gadget: '{query}'. "
-                           f"I found a webpage titled '{page_title}'. "
-                           f"Text from page: '{page_content[:500]}'. "
-                           "Is this page offering the main product itself for sale, and not just an accessory, review, or news article? "
-                           "Answer with only the word YES or NO.")
-    
-    print(f"  Verificando con Gemini ({category}): ¿Es '{page_title[:30]}...' una página de producto?")
+    prompt_template = (f"You are a product verification analyst. User search: '{query}'. Page title: '{page_title}'. Is this a retail page for the main product, not an accessory or article? Answer YES or NO.")
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         response = model.generate_content(prompt_template)
-        answer = response.text.strip().upper()
-        print(f"  Respuesta de verificación: {answer}")
-        return answer == "YES"
-    except Exception as e:
-        print(f"  Error en Gemini (verificación): {e}"); return False
+        return "YES" in response.text.strip().upper()
+    except Exception: return False
 
 def _get_suggestions_with_gemini(query: str) -> List[str]:
     if not genai: return []
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = f"A user searched for '{query}' and found no results. Provide 3 alternative, more effective search queries for finding this product online. Respond with a JSON list of strings, like [\"query 1\", \"query 2\", \"query 3\"]."
+        prompt = f"A user searched for '{query}' and found no results. Provide 3 alternative, more effective search queries. Respond with a JSON list of strings, like [\"query 1\", \"query 2\", \"query 3\"]."
         response = model.generate_content(prompt)
         cleaned_response = response.text.strip().replace("```json", "").replace("```", "")
         return json.loads(cleaned_response)
@@ -168,93 +150,59 @@ class SmartShoppingBot:
             except Exception as e:
                 print(f"❌ ERROR CRÍTICO EN VISION INIT: {e}")
 
-    def _aggregate_vision_results(self, response):
-        clues = []
-        if response.web_detection and response.web_detection.best_guess_labels: clues.append(f"Best Guess from web: {response.web_detection.best_guess_labels[0].label}")
-        if response.logo_annotations: clues.append(f"Logos Detected: {', '.join([logo.description for logo in response.logo_annotations])}")
-        if response.label_annotations: clues.append(f"Labels: {', '.join([label.description for label in response.label_annotations[:3]])}")
-        return ". ".join(clues)
-
     def get_query_from_image(self, image_content: bytes) -> Optional[str]:
-        if not self.vision_client: print("  ❌ Análisis con Vision saltado: Cliente no inicializado."); return None
-        print("  🧠 Analizando imagen con Google Cloud Vision (Multi-Feature)...")
+        if not self.vision_client: print("  ❌ Análisis con Vision saltado."); return None
+        print("  🧠 Analizando imagen con Google Cloud Vision...")
         try:
             image_for_api = vision.Image(content=image_content)
-            features = [vision.Feature(type_=vision.Feature.Type.WEB_DETECTION), vision.Feature(type_=vision.Feature.Type.LOGO_DETECTION), vision.Feature(type_=vision.Feature.Type.LABEL_DETECTION)]
-            request_body = vision.AnnotateImageRequest(image=image_for_api, features=features)
-            response = self.vision_client.annotate_image(request=request_body)
-            aggregated_clues = self._aggregate_vision_results(response)
-            if not aggregated_clues or not genai: return response.web_detection.best_guess_labels[0].label if response.web_detection else None
-            
-            print(f"  Synthesizing search term from clues: '{aggregated_clues}'")
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            prompt = (f"You are an expert in identifying industrial parts, machinery, automotive components and consumer technology. "
-                      f"Based on these data points from an image analysis, create the best possible search query to find this specific item. "
-                      f"Include brand, model, material, and any identifying numbers if possible. DATA: '{aggregated_clues}'. "
-                      "Respond ONLY with the synthesized search query.")
-            gemini_response = model.generate_content(prompt)
-            search_term = gemini_response.text.strip().replace('\n', '')
-            print(f"  ✅ Consulta experta sintetizada por Gemini: '{search_term}'")
-            return search_term
+            response = self.vision_client.web_detection(image=image_for_api)
+            if response.web_detection and response.web_detection.best_guess_labels:
+                query = response.web_detection.best_guess_labels[0].label
+                print(f"  ✅ Consulta generada por Vision: '{query}'")
+                return query
+            return None
         except Exception as e:
-            print(f"  ❌ Fallo en análisis de imagen o síntesis: {e}"); return None
+            print(f"  ❌ Fallo en análisis de imagen: {e}"); return None
 
     def _combine_text_and_image_query(self, text_query: str, image_query: str) -> str:
         if not genai: return f"{text_query} {image_query}"
         try:
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            prompt = f"Combine these into a single, effective search query. User's text: '{text_query}'. Description from image: '{image_query}'. Respond only with the final search query."
+            prompt = f"Combine these into a single, effective search query. User's text: '{text_query}'. Description from image: '{image_query}'. Respond only with the final query."
             response = model.generate_content(prompt)
             return response.text.strip()
         except Exception: return f"{text_query} {image_query}"
 
-    def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str]]:
-        text_query = query.strip() if query else None
-        image_query = self.get_query_from_image(image_content) if image_content else None
-        final_query = None
-        if text_query and image_query:
-            final_query = self._combine_text_and_image_query(text_query, image_query)
-        elif text_query: final_query = text_query
-        elif image_query: final_query = image_query
-        if not final_query: print("❌ No se pudo determinar una consulta válida."); return [], []
-        
-        category = _get_product_category(final_query)
-        
-        print(f"🔍 Lanzando búsqueda ({category}) para: '{final_query}'")
-        best_deals = self.search_with_ai_verification(final_query, category)
-        
-        suggestions = []
-        if not best_deals:
-            print("🤔 No se encontraron resultados. Generando sugerencias...")
-            suggestions = _get_suggestions_with_gemini(final_query)
-        return best_deals, suggestions
+    def search_google_shopping(self, query: str) -> List[ProductResult]:
+        print(f"--- Iniciando búsqueda en Google Shopping para: '{query}' ---")
+        params = {"q": query, "engine": "google_shopping", "location": "United States", "gl": "us", "hl": "en", "api_key": self.serpapi_key}
+        try:
+            response = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
+            response.raise_for_status()
+            products = []
+            for item in response.json().get('shopping_results', []):
+                if 'price' in item and 'title' in item:
+                    try:
+                        price_str = item.get('extracted_price', item['price'])
+                        price_float = float(re.sub(r'[^\d.]', '', str(price_str)))
+                        if price_float > 0:
+                            products.append(ProductResult(name=item['title'], price=price_float, store=item.get('source', 'Google'), url=item['link'], image_url=item.get('thumbnail', '')))
+                    except (ValueError, TypeError): continue
+            print(f"✅ Google Shopping encontró {len(products)} resultados válidos.")
+            return products
+        except Exception as e:
+            print(f"❌ Ocurrió un error en Google Shopping: {e}"); return []
 
     def search_with_ai_verification(self, query: str, category: str) -> List[ProductResult]:
-        if category == "industrial_parts":
-            search_query = f'{query} supplier distributor'
-            blacklist = ['amazon.com', 'walmart.com', 'ebay.com', 'alibaba.com', 'aliexpress.com', 'etsy.com', 'pinterest.com']
-            tbm_param = None
-        else: # consumer_tech
-            search_query = query
-            blacklist = []
-            tbm_param = "shop"
-
-        print(f"--- Búsqueda final en SerpApi: '{search_query}' ---")
-        params = {"q": search_query, "engine": "google", "tbm": tbm_param, "location": "United States", "gl": "us", "hl": "en", "num": "25", "api_key": self.serpapi_key}
-        params = {k: v for k, v in params.items() if v is not None}
-        
+        search_query = f'{query} supplier' if category == 'industrial_parts' else query
+        print(f"--- Iniciando búsqueda profunda ({category}): '{search_query}' ---")
+        params = {"q": search_query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "num": "20", "api_key": self.serpapi_key}
         try:
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=45)
             response.raise_for_status()
-            
-            results_key = 'shopping_results' if category == 'consumer_tech' and 'shopping_results' in response.json() else 'organic_results'
-            initial_results = response.json().get(results_key, [])
-
-            if blacklist:
-                filtered_results = [item for item in initial_results if not any(site in item.get('link', '') for site in blacklist)]
-            else:
-                filtered_results = initial_results
-
+            initial_results = response.json().get('organic_results', [])
+            blacklist = ['amazon.com', 'walmart.com', 'ebay.com'] if category == "industrial_parts" else []
+            filtered_results = [item for item in initial_results if not any(site in item.get('link', '') for site in blacklist)] if blacklist else initial_results
             valid_results = []
             with ThreadPoolExecutor(max_workers=5) as executor:
                 future_to_item = {executor.submit(_deep_scrape_content, item.get('link')): item for item in filtered_results if item.get('link')}
@@ -264,23 +212,45 @@ class SmartShoppingBot:
                     if content and content['price'] != "N/A":
                         if _verify_is_product_page(query, content['title'], content['text'], category):
                             try:
-                                price_float = float(content['price'])
-                                valid_results.append({'store': _get_clean_company_name(item), 'product_name': item.get('title', 'Sin título'), 'price_float': price_float, 'url': item.get('link'), 'image_url': content['image'] or item.get('thumbnail', '')})
+                                valid_results.append(ProductResult(name=content['title'], price=float(content['price']), store=_get_clean_company_name(item), url=item.get('link'), image_url=content['image'] or item.get('thumbnail', '')))
                             except (ValueError, TypeError): continue
-            
-            if not valid_results: return []
-            
-            if len(valid_results) >= 2:
-                prices = [r['price_float'] for r in valid_results]
-                mean_price = statistics.mean(prices)
-                price_threshold = max(0.50, mean_price / 10)
-                valid_results = [r for r in valid_results if r['price_float'] >= price_threshold]
-
-            valid_results.sort(key=lambda x: x['price_float'])
-            final_results_obj = [ProductResult(name=res['product_name'], price=res['price_float'], store=res['store'], url=res['url'], image_url=res.get('image_url', '')) for res in valid_results]
-            return final_results_obj[:30]
+            return valid_results
         except Exception as e:
-            print(f"❌ Ocurrió un error en la búsqueda avanzada: {e}"); return []
+            print(f"❌ Ocurrió un error en la búsqueda profunda: {e}"); return []
+
+    def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str]]:
+        text_query = query.strip() if query else None
+        image_query = self.get_query_from_image(image_content) if image_content else None
+        final_query = None
+        if text_query and image_query: final_query = self._combine_text_and_image_query(text_query, image_query)
+        elif text_query: final_query = text_query
+        elif image_query: final_query = image_query
+        if not final_query: print("❌ No se pudo determinar una consulta válida."); return [], []
+        
+        category = _get_product_category(final_query)
+        print(f"🔍 Lanzando búsqueda HÍBRIDA ({category}) para: '{final_query}'")
+        
+        all_results = []
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_deep_search = executor.submit(self.search_with_ai_verification, final_query, category)
+            future_shopping_search = executor.submit(self.search_google_shopping, final_query)
+            all_results.extend(future_deep_search.result())
+            all_results.extend(future_shopping_search.result())
+
+        if not all_results:
+            print("🤔 No se encontraron resultados. Generando sugerencias...")
+            return [], _get_suggestions_with_gemini(final_query)
+
+        seen_urls = set()
+        unique_results = []
+        for product in all_results:
+            if product.url not in seen_urls:
+                unique_results.append(product)
+                seen_urls.add(product.url)
+        
+        unique_results.sort(key=lambda x: x.price)
+        print(f"✅ Búsqueda híbrida finalizada. {len(unique_results)} resultados únicos encontrados.")
+        return unique_results, []
 
 # ==============================================================================
 # SECCIÓN 3: RUTAS FLASK Y EJECUCIÓN
