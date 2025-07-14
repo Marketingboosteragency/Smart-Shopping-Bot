@@ -1,12 +1,12 @@
-# app.py (versión 14.0 - Análisis de Imagen Experto y Filtro de Precio)
+# app.py (versión 14.1 - Optimizado y Completo)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 14.0 (Expert Image Analysis & Price Filter)
+# Versión: 14.1 (Stability-Optimized Hybrid Engine - Full Code)
 # Novedades:
-# - Se rediseña el análisis de imagen: Gemini Vision describe la imagen directamente.
-# - Se elimina la dependencia de google-cloud-vision.
-# - Se añade un filtro para descartar productos con precio inferior a $0.99.
+# - Código completo y verificado, listo para copiar y pegar.
+# - Lógica de verificación por lotes para evitar errores de cuota de la API.
+# - Carga de trabajo reducida (menos resultados y paralelismo) para mayor estabilidad.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -55,7 +55,7 @@ if genai and GEMINI_API_KEY:
         genai = None
 
 # ==============================================================================
-# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (ADAPTATIVA Y MEJORADA)
+# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (OPTIMIZADA)
 # ==============================================================================
 
 def _deep_scrape_content(url: str) -> Dict[str, Any]:
@@ -92,14 +92,39 @@ def _get_product_category(query: str) -> str:
     except Exception:
         return "consumer_tech"
 
-def _verify_is_product_page(query: str, page_title: str, page_content: str, category: str) -> bool:
-    if not genai: return True
-    prompt_template = (f"You are a verification analyst. User search: '{query}'. Page title: '{page_title}'. Is this a retail page for the main product, not an accessory or article? Answer YES or NO.")
+def _verify_pages_in_batch(query: str, pages_data: List[Dict], category: str) -> List[Dict]:
+    if not genai or not pages_data: return pages_data
+    print(f"  Verificando un lote de {len(pages_data)} páginas con Gemini ({category})...")
+    
+    pages_to_verify_str = ""
+    for i, page in enumerate(pages_data):
+        pages_to_verify_str += f"\n--- Página {i+1} ---\nTítulo: {page['content']['title']}\n"
+
+    prompt_action = "Is this page from a specialized distributor or manufacturer offering the main product for sale? Exclude general marketplaces and informational articles." if category == "industrial_parts" else "Is this page a retail page offering the main product for sale, not just an accessory or a review?"
+    
+    prompt = (f"You are a product verification analyst. The user is searching for '{query}'. "
+              f"I have found several web pages. For each page, tell me if it is a valid retail page to buy the main product. {prompt_action} "
+              "Your response must be a JSON object where keys are the page numbers (e.g., '1', '2') and values are either 'YES' or 'NO'.\n"
+              f"{pages_to_verify_str}")
+              
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        response = model.generate_content(prompt_template)
-        return "YES" in response.text.strip().upper()
-    except Exception: return False
+        response = model.generate_content(prompt)
+        json_str_match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        if not json_str_match: raise ValueError("La respuesta de Gemini no contiene un JSON válido.")
+        
+        verification_results = json.loads(json_str_match.group(0))
+        print(f"  Respuesta de verificación en lote: {verification_results}")
+
+        verified_pages = []
+        for i, page in enumerate(pages_data):
+            if verification_results.get(str(i + 1), 'NO').upper() == 'YES':
+                verified_pages.append(page)
+        
+        return verified_pages
+    except Exception as e:
+        print(f"  ❌ Error en Gemini (verificación por lote): {e}. Asumiendo que ninguna página es válida.")
+        return []
 
 def _get_suggestions_with_gemini(query: str) -> List[str]:
     if not genai: return []
@@ -125,28 +150,19 @@ class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
 
-    # GÉNESIS: Nueva función experta con Gemini Vision
     def get_descriptive_query_from_image(self, image_content: bytes) -> Optional[str]:
-        if not genai:
-            print("  ❌ Análisis con Gemini Vision saltado: Modelo no configurado.")
-            return None
+        if not genai: print("  ❌ Análisis con Gemini Vision saltado."); return None
         print("  🧠 Analizando imagen con Gemini Vision (Modo Experto Dual)...")
         try:
             image_pil = Image.open(io.BytesIO(image_content))
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            prompt = """You are an expert in identifying both industrial/automotive parts and consumer technology products.
-            Analyze the following image in detail. Identify the main object, its likely material, color, potential brand, and any unique features.
-            Based on your analysis, generate a single, highly effective, and specific search query in English to find this product for sale online.
-            For industrial parts, be very specific (e.g., 'aluminum engine oil pan').
-            For consumer tech, include the model name if recognizable.
-            Respond ONLY with the search query itself, nothing else."""
+            prompt = """You are an expert in identifying both industrial/automotive parts and consumer technology products. Analyze the image and generate a specific, effective search query in English. Respond ONLY with the search query."""
             response = model.generate_content([prompt, image_pil])
             query = response.text.strip().replace("*", "")
             print(f"  ✅ Consulta experta generada por Gemini Vision: '{query}'")
             return query
         except Exception as e:
-            print(f"  ❌ Fallo CRÍTICO en análisis con Gemini Vision: {e}")
-            return None
+            print(f"  ❌ Fallo CRÍTICO en análisis con Gemini Vision: {e}"); return None
             
     def _combine_text_and_image_query(self, text_query: str, image_query: str) -> str:
         if not genai: return f"{text_query} {image_query}"
@@ -169,7 +185,6 @@ class SmartShoppingBot:
                     try:
                         price_str = item.get('extracted_price', item['price'])
                         price_float = float(re.sub(r'[^\d.]', '', str(price_str)))
-                        # GÉNESIS: Aplicamos filtro de precio mínimo
                         if price_float >= 0.99:
                             products.append(ProductResult(name=item['title'], price=price_float, store=item.get('source', 'Google'), url=item['link'], image_url=item.get('thumbnail', '')))
                     except (ValueError, TypeError): continue
@@ -181,27 +196,34 @@ class SmartShoppingBot:
     def search_with_ai_verification(self, query: str, category: str) -> List[ProductResult]:
         search_query = f'{query} supplier' if category == 'industrial_parts' else query
         print(f"--- Iniciando búsqueda profunda ({category}): '{search_query}' ---")
-        params = {"q": search_query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "num": "20", "api_key": self.serpapi_key}
+        params = {"q": search_query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "num": "15", "api_key": self.serpapi_key}
         try:
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=45)
             response.raise_for_status()
             initial_results = response.json().get('organic_results', [])
             blacklist = ['amazon.com', 'walmart.com', 'ebay.com'] if category == "industrial_parts" else []
             filtered_results = [item for item in initial_results if not any(site in item.get('link', '') for site in blacklist)] if blacklist else initial_results
-            valid_results = []
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            
+            scraped_results = []
+            with ThreadPoolExecutor(max_workers=3) as executor:
                 future_to_item = {executor.submit(_deep_scrape_content, item.get('link')): item for item in filtered_results if item.get('link')}
                 for future in as_completed(future_to_item):
                     item = future_to_item[future]
                     content = future.result()
                     if content and content['price'] != "N/A":
-                        if _verify_is_product_page(query, content['title'], content['text'], category):
-                            try:
-                                price_float = float(content['price'])
-                                # GÉNESIS: Aplicamos filtro de precio mínimo
-                                if price_float >= 0.99:
-                                    valid_results.append(ProductResult(name=content['title'], price=price_float, store=_get_clean_company_name(item), url=item.get('link'), image_url=content['image'] or item.get('thumbnail', '')))
-                            except (ValueError, TypeError): continue
+                        scraped_results.append({'item': item, 'content': content})
+            
+            if not scraped_results: return []
+            
+            verified_pages_data = _verify_pages_in_batch(query, scraped_results, category)
+            
+            valid_results = []
+            for res in verified_pages_data:
+                try:
+                    price_float = float(res['content']['price'])
+                    if price_float >= 0.99:
+                        valid_results.append(ProductResult(name=res['content']['title'], price=price_float, store=_get_clean_company_name(res['item']), url=res['item'].get('link'), image_url=res['content']['image'] or res['item'].get('thumbnail', '')))
+                except (ValueError, TypeError): continue
             return valid_results
         except Exception as e:
             print(f"❌ Ocurrió un error en la búsqueda profunda: {e}"); return []
