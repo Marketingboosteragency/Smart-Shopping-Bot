@@ -1,13 +1,11 @@
-# app.py (versión 13.0 - Análisis de Imagen por Experto IA)
+# app.py (versión 12.1 - Completa y Verificada)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 13.0 (Expert Image Analysis with Gemini Vision)
+# Versión: 12.1 (Adaptive Search Brain - Full Code Verified)
 # Novedades:
-# - Se rediseña el análisis de imagen: Gemini Vision ahora describe la imagen directamente.
-# - Se elimina la dependencia de google-cloud-vision, simplificando el código.
-# - La IA actúa como un "experto dual" para identificar tanto piezas como tecnología.
-# - El cerebro adaptativo sigue funcionando, pero ahora con consultas de imagen de alta calidad.
+# - Se restaura el código completo de las rutas de Flask y las plantillas HTML.
+# - Mantiene la lógica de IA adaptativa para productos industriales y de consumo.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -29,6 +27,12 @@ from PIL import Image
 
 # --- IMPORTS DE APIS DE GOOGLE ---
 try:
+    from google.cloud import vision
+    print("✅ Módulo de Google Cloud Vision importado.")
+except ImportError:
+    print("⚠️ AVISO: 'google-cloud-vision' no está instalado.")
+    vision = None
+try:
     import google.generativeai as genai
     print("✅ Módulo de Google Generative AI (Gemini) importado.")
 except ImportError:
@@ -44,9 +48,10 @@ app = Flask(__name__)
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
 FIREBASE_WEB_API_KEY = os.environ.get("FIREBASE_WEB_API_KEY")
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+GOOGLE_CREDENTIALS_JSON_STR = os.environ.get('GOOGLE_CREDENTIALS_JSON')
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'una-clave-secreta-muy-fuerte')
 
-# Configuración de Gemini
+# Configuración de APIs
 if genai and GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
@@ -55,8 +60,18 @@ if genai and GEMINI_API_KEY:
         print(f"❌ ERROR al configurar API de Gemini: {e}")
         genai = None
 
+if GOOGLE_CREDENTIALS_JSON_STR and vision:
+    try:
+        google_creds_info = json.loads(GOOGLE_CREDENTIALS_JSON_STR)
+        with open('/tmp/google-credentials.json', 'w') as f:
+            json.dump(google_creds_info, f)
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/tmp/google-credentials.json'
+        print("✅ Credenciales de Google Vision cargadas.")
+    except Exception as e:
+        print(f"❌ ERROR al cargar credenciales de Google Vision: {e}")
+
 # ==============================================================================
-# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (ADAPTATIVA Y MEJORADA)
+# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (ADAPTATIVA)
 # ==============================================================================
 
 def _deep_scrape_content(url: str) -> Dict[str, Any]:
@@ -87,7 +102,8 @@ def _get_product_category(query: str) -> str:
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         prompt = (f"Classify the following product search query. Is it for 'industrial_parts' (machinery, car parts, tools, components) or 'consumer_tech' (phones, laptops, electronics, gadgets)? "
-                  f"Query: '{query}'. Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
+                  f"Query: '{query}'. "
+                  "Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
         response = model.generate_content(prompt)
         category = response.text.strip()
         print(f"  Categoría detectada: {category}")
@@ -97,7 +113,20 @@ def _get_product_category(query: str) -> str:
 
 def _verify_is_product_page(query: str, page_title: str, page_content: str, category: str) -> bool:
     if not genai: return True
-    prompt_template = (f"You are a product verification analyst. The user is searching for '{query}'. I found a webpage titled '{page_title}'. Is this page offering the main product itself for sale, and not just an accessory, review, or informational article? Answer with only YES or NO.")
+    
+    if category == "industrial_parts":
+        prompt_template = (f"You are a B2B product verification analyst. The user is searching for an industrial part: '{query}'. "
+                           f"I found a webpage titled '{page_title}'. "
+                           f"Text from page: '{page_content[:500]}'. "
+                           "Is this page from a specialized distributor, manufacturer, or B2B supplier offering the main product for sale? Exclude general marketplaces like Amazon/eBay, informational articles, and forums. "
+                           "Answer with only the word YES or NO.")
+    else: # consumer_tech
+        prompt_template = (f"You are a product verification analyst. The user is searching for a tech gadget: '{query}'. "
+                           f"I found a webpage titled '{page_title}'. "
+                           f"Text from page: '{page_content[:500]}'. "
+                           "Is this page offering the main product itself for sale, and not just an accessory, review, or news article? "
+                           "Answer with only the word YES or NO.")
+    
     print(f"  Verificando con Gemini ({category}): ¿Es '{page_title[:30]}...' una página de producto?")
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
@@ -112,7 +141,7 @@ def _get_suggestions_with_gemini(query: str) -> List[str]:
     if not genai: return []
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = f"A user searched for '{query}' and found no results. Provide 3 alternative, more effective search queries. Respond with a JSON list of strings, like [\"query 1\", \"query 2\", \"query 3\"]."
+        prompt = f"A user searched for '{query}' and found no results. Provide 3 alternative, more effective search queries for finding this product online. Respond with a JSON list of strings, like [\"query 1\", \"query 2\", \"query 3\"]."
         response = model.generate_content(prompt)
         cleaned_response = response.text.strip().replace("```json", "").replace("```", "")
         return json.loads(cleaned_response)
@@ -131,29 +160,45 @@ class ProductResult:
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
+        self.vision_client = None
+        if vision and GOOGLE_CREDENTIALS_JSON_STR:
+            try:
+                self.vision_client = vision.ImageAnnotatorClient()
+                print("✅ Cliente de Google Cloud Vision inicializado.")
+            except Exception as e:
+                print(f"❌ ERROR CRÍTICO EN VISION INIT: {e}")
 
-    def get_descriptive_query_from_image(self, image_content: bytes) -> Optional[str]:
-        if not genai:
-            print("  ❌ Análisis con Gemini Vision saltado: Modelo no configurado.")
-            return None
-        print("  🧠 Analizando imagen con Gemini Vision (Modo Experto Dual)...")
+    def _aggregate_vision_results(self, response):
+        clues = []
+        if response.web_detection and response.web_detection.best_guess_labels: clues.append(f"Best Guess from web: {response.web_detection.best_guess_labels[0].label}")
+        if response.logo_annotations: clues.append(f"Logos Detected: {', '.join([logo.description for logo in response.logo_annotations])}")
+        if response.label_annotations: clues.append(f"Labels: {', '.join([label.description for label in response.label_annotations[:3]])}")
+        return ". ".join(clues)
+
+    def get_query_from_image(self, image_content: bytes) -> Optional[str]:
+        if not self.vision_client: print("  ❌ Análisis con Vision saltado: Cliente no inicializado."); return None
+        print("  🧠 Analizando imagen con Google Cloud Vision (Multi-Feature)...")
         try:
-            image_pil = Image.open(io.BytesIO(image_content))
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            prompt = """You are an expert in identifying both industrial/automotive parts and consumer technology products.
-            Analyze the following image in detail. Identify the main object, its likely material, color, potential brand, and any unique features.
-            Based on your analysis, generate a single, highly effective, and specific search query in English to find this product for sale online.
-            For industrial parts, be very specific about the type of part (e.g., 'engine oil pan', 'brake caliper').
-            For consumer tech, include the model name if recognizable.
-            Respond ONLY with the search query itself, nothing else."""
-            response = model.generate_content([prompt, image_pil])
-            query = response.text.strip().replace("*", "")
-            print(f"  ✅ Consulta experta generada por Gemini Vision: '{query}'")
-            return query
-        except Exception as e:
-            print(f"  ❌ Fallo CRÍTICO en análisis con Gemini Vision: {e}")
-            return None
+            image_for_api = vision.Image(content=image_content)
+            features = [vision.Feature(type_=vision.Feature.Type.WEB_DETECTION), vision.Feature(type_=vision.Feature.Type.LOGO_DETECTION), vision.Feature(type_=vision.Feature.Type.LABEL_DETECTION)]
+            request_body = vision.AnnotateImageRequest(image=image_for_api, features=features)
+            response = self.vision_client.annotate_image(request=request_body)
+            aggregated_clues = self._aggregate_vision_results(response)
+            if not aggregated_clues or not genai: return response.web_detection.best_guess_labels[0].label if response.web_detection else None
             
+            print(f"  Synthesizing search term from clues: '{aggregated_clues}'")
+            model = genai.GenerativeModel('gemini-1.5-flash-latest')
+            prompt = (f"You are an expert in identifying industrial parts, machinery, automotive components and consumer technology. "
+                      f"Based on these data points from an image analysis, create the best possible search query to find this specific item. "
+                      f"Include brand, model, material, and any identifying numbers if possible. DATA: '{aggregated_clues}'. "
+                      "Respond ONLY with the synthesized search query.")
+            gemini_response = model.generate_content(prompt)
+            search_term = gemini_response.text.strip().replace('\n', '')
+            print(f"  ✅ Consulta experta sintetizada por Gemini: '{search_term}'")
+            return search_term
+        except Exception as e:
+            print(f"  ❌ Fallo en análisis de imagen o síntesis: {e}"); return None
+
     def _combine_text_and_image_query(self, text_query: str, image_query: str) -> str:
         if not genai: return f"{text_query} {image_query}"
         try:
@@ -165,7 +210,7 @@ class SmartShoppingBot:
 
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str]]:
         text_query = query.strip() if query else None
-        image_query = self.get_descriptive_query_from_image(image_content) if image_content else None
+        image_query = self.get_query_from_image(image_content) if image_content else None
         final_query = None
         if text_query and image_query:
             final_query = self._combine_text_and_image_query(text_query, image_query)
@@ -189,7 +234,7 @@ class SmartShoppingBot:
             search_query = f'{query} supplier distributor'
             blacklist = ['amazon.com', 'walmart.com', 'ebay.com', 'alibaba.com', 'aliexpress.com', 'etsy.com', 'pinterest.com']
             tbm_param = None
-        else:
+        else: # consumer_tech
             search_query = query
             blacklist = []
             tbm_param = "shop"
