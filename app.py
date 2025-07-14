@@ -1,13 +1,12 @@
-# app.py (versión 13.0 - Motor de Búsqueda Híbrido)
+# app.py (versión 13.1 - Motor de Búsqueda Híbrido - Completo)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 13.0 (Hybrid Search Engine)
+# Versión: 13.1 (Hybrid Search Engine - Full Code Verified)
 # Novedades:
+# - Código completo y verificado, listo para copiar y pegar.
 # - Se implementa un motor de búsqueda dual que consulta Google Orgánico y Google Shopping en paralelo.
-# - Se garantiza la obtención de resultados de las principales tiendas gracias a Google Shopping.
-# - Se mantiene la búsqueda profunda para encontrar proveedores especializados.
-# - Los resultados de ambas búsquedas se fusionan y deduplican inteligentemente.
+# - Garantiza la obtención de resultados al tener una fuente de respaldo (Shopping).
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -102,8 +101,7 @@ def _get_product_category(query: str) -> str:
     if not genai: return "consumer_tech"
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = (f"Classify the following product search query. Is it for 'industrial_parts' (machinery, car parts, tools, components) or 'consumer_tech' (phones, laptops, electronics, gadgets)? "
-                  f"Query: '{query}'. Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
+        prompt = (f"Classify the following product search query. Is it for 'industrial_parts' or 'consumer_tech'? Query: '{query}'. Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
         response = model.generate_content(prompt)
         category = response.text.strip()
         return category if category in ["industrial_parts", "consumer_tech"] else "consumer_tech"
@@ -112,7 +110,7 @@ def _get_product_category(query: str) -> str:
 
 def _verify_is_product_page(query: str, page_title: str, page_content: str, category: str) -> bool:
     if not genai: return True
-    prompt_template = (f"You are a product verification analyst. User search: '{query}'. Page title: '{page_title}'. Is this a retail page for the main product, not an accessory or article? Answer YES or NO.")
+    prompt_template = (f"You are a verification analyst. User search: '{query}'. Page title: '{page_title}'. Is this a retail page for the main product, not an accessory or article? Answer YES or NO.")
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         response = model.generate_content(prompt_template)
@@ -172,7 +170,7 @@ class SmartShoppingBot:
             response = model.generate_content(prompt)
             return response.text.strip()
         except Exception: return f"{text_query} {image_query}"
-
+    
     def search_google_shopping(self, query: str) -> List[ProductResult]:
         print(f"--- Iniciando búsqueda en Google Shopping para: '{query}' ---")
         params = {"q": query, "engine": "google_shopping", "location": "United States", "gl": "us", "hl": "en", "api_key": self.serpapi_key}
