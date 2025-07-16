@@ -1,11 +1,11 @@
-# app.py (versión 14.0 - Motor de Búsqueda Híbrido y Experto IA)
+# app.py (versión 14.1 - Búsqueda Geo-localizada y Completa)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 14.0 (Hybrid Search & Expert Image Analysis)
+# Versión: 14.1 (Geo-locked Search & Full Functionality)
 # Novedades:
-# - Se reemplaza Google Vision por un análisis directo con Gemini Vision experto.
-# - Se implementa un motor de búsqueda dual (Profundo + Google Shopping) para máxima robustez.
+# - Se añade un filtro estricto para descartar resultados de dominios no estadounidenses.
+# - Se refuerza la búsqueda en SerpApi para priorizar explícitamente a EE. UU.
 # - Código completo y verificado, listo para copiar y pegar.
 # ==============================================================================
 
@@ -28,6 +28,12 @@ from PIL import Image
 
 # --- IMPORTS DE APIS DE GOOGLE ---
 try:
+    from google.cloud import vision
+    print("✅ Módulo de Google Cloud Vision importado.")
+except ImportError:
+    print("⚠️ AVISO: 'google-cloud-vision' no está instalado.")
+    vision = None
+try:
     import google.generativeai as genai
     print("✅ Módulo de Google Generative AI (Gemini) importado.")
 except ImportError:
@@ -43,9 +49,10 @@ app = Flask(__name__)
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
 FIREBASE_WEB_API_KEY = os.environ.get("FIREBASE_WEB_API_KEY")
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+GOOGLE_CREDENTIALS_JSON_STR = os.environ.get('GOOGLE_CREDENTIALS_JSON')
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'una-clave-secreta-muy-fuerte')
 
-# Configuración de Gemini
+# Configuración de APIs
 if genai and GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
@@ -54,8 +61,18 @@ if genai and GEMINI_API_KEY:
         print(f"❌ ERROR al configurar API de Gemini: {e}")
         genai = None
 
+if GOOGLE_CREDENTIALS_JSON_STR and vision:
+    try:
+        google_creds_info = json.loads(GOOGLE_CREDENTIALS_JSON_STR)
+        with open('/tmp/google-credentials.json', 'w') as f:
+            json.dump(google_creds_info, f)
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/tmp/google-credentials.json'
+        print("✅ Credenciales de Google Vision cargadas.")
+    except Exception as e:
+        print(f"❌ ERROR al cargar credenciales de Google Vision: {e}")
+
 # ==============================================================================
-# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (HÍBRIDA Y EXPERTA)
+# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (GEO-LOCALIZADA)
 # ==============================================================================
 
 def _deep_scrape_content(url: str) -> Dict[str, Any]:
@@ -84,8 +101,7 @@ def _get_product_category(query: str) -> str:
     if not genai: return "consumer_tech"
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = (f"Classify the following product search query. Is it for 'industrial_parts' (machinery, car parts, tools, components) or 'consumer_tech' (phones, laptops, electronics, gadgets)? "
-                  f"Query: '{query}'. Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
+        prompt = (f"Classify the following product search query. Is it for 'industrial_parts' (machinery, car parts, tools, components) or 'consumer_tech' (phones, laptops, electronics, gadgets)? Query: '{query}'. Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
         response = model.generate_content(prompt)
         category = response.text.strip()
         return category if category in ["industrial_parts", "consumer_tech"] else "consumer_tech"
@@ -117,6 +133,15 @@ def _get_clean_company_name(item: Dict) -> str:
         return urlparse(item.get('link', '')).netloc.replace('www.', '').split('.')[0].capitalize()
     except: return "Tienda"
 
+def _is_usa_domain(url: str) -> bool:
+    """Verifica si el dominio de una URL parece ser de EE. UU."""
+    try:
+        domain = urlparse(url).netloc
+        allowed_tlds = ['.com', '.net', '.org', '.us', '.gov', '.edu']
+        return any(domain.endswith(tld) for tld in allowed_tlds)
+    except:
+        return False
+
 @dataclass
 class ProductResult:
     name: str; price: float; store: str; url: str; image_url: str = ""
@@ -124,26 +149,28 @@ class ProductResult:
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
+        self.vision_client = None
+        if vision and GOOGLE_CREDENTIALS_JSON_STR:
+            try:
+                self.vision_client = vision.ImageAnnotatorClient()
+                print("✅ Cliente de Google Cloud Vision inicializado.")
+            except Exception as e:
+                print(f"❌ ERROR CRÍTICO EN VISION INIT: {e}")
 
-    def get_descriptive_query_from_image(self, image_content: bytes) -> Optional[str]:
-        if not genai: print("  ❌ Análisis con Gemini Vision saltado."); return None
-        print("  🧠 Analizando imagen con Gemini Vision (Modo Experto Dual)...")
+    def get_query_from_image(self, image_content: bytes) -> Optional[str]:
+        if not self.vision_client: print("  ❌ Análisis con Vision saltado."); return None
+        print("  🧠 Analizando imagen con Google Cloud Vision...")
         try:
-            image_pil = Image.open(io.BytesIO(image_content))
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            prompt = """You are an expert in identifying both industrial/automotive parts and consumer technology products.
-            Analyze the following image in detail. Identify the main object, its likely material, color, potential brand, and any unique features.
-            Based on your analysis, generate a single, highly effective, and specific search query in English to find this product for sale online.
-            For industrial parts, be very specific (e.g., 'aluminum engine oil pan').
-            For consumer tech, include the model name if recognizable.
-            Respond ONLY with the search query itself, nothing else."""
-            response = model.generate_content([prompt, image_pil])
-            query = response.text.strip().replace("*", "")
-            print(f"  ✅ Consulta experta generada por Gemini Vision: '{query}'")
-            return query
+            image_for_api = vision.Image(content=image_content)
+            response = self.vision_client.web_detection(image=image_for_api)
+            if response.web_detection and response.web_detection.best_guess_labels:
+                query = response.web_detection.best_guess_labels[0].label
+                print(f"  ✅ Consulta generada por Vision: '{query}'")
+                return query
+            return None
         except Exception as e:
-            print(f"  ❌ Fallo CRÍTICO en análisis con Gemini Vision: {e}"); return None
-            
+            print(f"  ❌ Fallo en análisis de imagen: {e}"); return None
+
     def _combine_text_and_image_query(self, text_query: str, image_query: str) -> str:
         if not genai: return f"{text_query} {image_query}"
         try:
@@ -174,15 +201,20 @@ class SmartShoppingBot:
             print(f"❌ Ocurrió un error en Google Shopping: {e}"); return []
 
     def search_with_ai_verification(self, query: str, category: str) -> List[ProductResult]:
-        search_query = f'{query} supplier' if category == 'industrial_parts' else query
+        search_query = f'{query} supplier USA' if category == 'industrial_parts' else f'{query} price USA'
         print(f"--- Iniciando búsqueda profunda ({category}): '{search_query}' ---")
         params = {"q": search_query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "num": "20", "api_key": self.serpapi_key}
         try:
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=45)
             response.raise_for_status()
             initial_results = response.json().get('organic_results', [])
+            
+            usa_results = [item for item in initial_results if _is_usa_domain(item.get('link', ''))]
+            print(f"  Resultados orgánicos: {len(initial_results)} -> Después de filtro de dominio USA: {len(usa_results)}")
+
             blacklist = ['amazon.com', 'walmart.com', 'ebay.com'] if category == "industrial_parts" else []
-            filtered_results = [item for item in initial_results if not any(site in item.get('link', '') for site in blacklist)] if blacklist else initial_results
+            filtered_results = [item for item in usa_results if not any(site in item.get('link', '') for site in blacklist)] if blacklist else usa_results
+            
             valid_results = []
             with ThreadPoolExecutor(max_workers=5) as executor:
                 future_to_item = {executor.submit(_deep_scrape_content, item.get('link')): item for item in filtered_results if item.get('link')}
@@ -202,7 +234,7 @@ class SmartShoppingBot:
 
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str]]:
         text_query = query.strip() if query else None
-        image_query = self.get_descriptive_query_from_image(image_content) if image_content else None
+        image_query = self.get_query_from_image(image_content) if image_content else None
         final_query = None
         if text_query and image_query: final_query = self._combine_text_and_image_query(text_query, image_query)
         elif text_query: final_query = text_query
