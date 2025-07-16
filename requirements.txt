@@ -8,5 +8,5 @@ fake-useragent==1.5.1
 beautifulsoup4==4.12.3
 Pillow==10.4.0
 
-# APIs de Google
+# API de Google
 google-generativeai==0.7.1
