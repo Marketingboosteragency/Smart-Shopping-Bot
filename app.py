@@ -18,7 +18,7 @@ import time
 import statistics
 import io
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from urllib.parse import urlparse, urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from fake_useragent import UserAgent
@@ -123,7 +123,7 @@ class ProductResult:
     store: str
     url: str
     image_url: str = ""
-    is_compatible: bool = False # GÉNESIS: Nuevo campo para distinguir resultados
+    is_compatible: bool = False
 
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
@@ -142,7 +142,7 @@ class SmartShoppingBot:
             return query
         except Exception as e:
             print(f"  ❌ Fallo CRÍTICO en análisis con Gemini Vision: {e}"); return None
-
+            
     def _combine_text_and_image_query(self, text_query: str, image_query: str) -> str:
         if not genai: return f"{text_query} {image_query}"
         try:
@@ -182,7 +182,7 @@ class SmartShoppingBot:
             initial_results = response.json().get('organic_results', [])
             blacklist = ['amazon.com', 'walmart.com', 'ebay.com'] if category == "industrial_parts" else []
             filtered_results = [item for item in initial_results if not any(site in item.get('link', '') for site in blacklist)] if blacklist else initial_results
-            valid_results = []
+            valid_results_data = []
             with ThreadPoolExecutor(max_workers=4) as executor:
                 future_to_item = {executor.submit(_deep_scrape_content, item.get('link')): item for item in filtered_results if item.get('link')}
                 for future in as_completed(future_to_item):
@@ -193,8 +193,10 @@ class SmartShoppingBot:
                             try:
                                 price_float = float(content['price'])
                                 if price_float >= 0.99:
-                                    valid_results.append({'item': item, 'content': content})
+                                    valid_results_data.append({'item': item, 'content': content})
                             except (ValueError, TypeError): continue
+            
+            valid_results = [ProductResult(name=res['content']['title'], price=float(res['content']['price']), store=_get_clean_company_name(res['item']), url=res['item']['link'], image_url=res['content']['image'] or res['item'].get('thumbnail', '')) for res in valid_results_data]
             return valid_results
         except Exception as e:
             print(f"❌ Ocurrió un error en la búsqueda profunda: {e}"); return []
@@ -205,7 +207,6 @@ class SmartShoppingBot:
         print(f"🧬 Iniciando búsqueda de piezas compatibles basada en: '{base_product.name}'")
         try:
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            # Scrape la descripción del producto base para un mejor contexto
             base_content = _deep_scrape_content(base_product.url)
             base_description = base_content['text'] if base_content else base_product.name
 
@@ -223,12 +224,12 @@ class SmartShoppingBot:
             compatible_results = []
             for query in compatible_queries:
                 results = self.search_google_shopping(query)
-                for res in results: res.is_compatible = True # Marcamos como resultado compatible
+                for res in results: res.is_compatible = True
                 compatible_results.extend(results)
             
             return compatible_results
         except Exception as e:
-            print(f"  ❌ Error en el motor de recomendación de compatibilidad: {e}"); return []
+            print(f"  ❌ Error en el motor de recomendación: {e}"); return []
 
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str]]:
         text_query = query.strip() if query else None
@@ -243,9 +244,9 @@ class SmartShoppingBot:
         print(f"🔍 Lanzando búsqueda HÍBRIDA ({category}) para: '{final_query}'")
         
         initial_shopping_results = self.search_google_shopping(final_query)
-        initial_deep_results_data = self.search_with_ai_verification(final_query, category) if category == 'industrial_parts' else []
-        
-        initial_deep_results = [ProductResult(name=res['content']['title'], price=float(res['content']['price']), store=_get_clean_company_name(res['item']), url=res['item']['link'], image_url=res['content']['image'] or res['item'].get('thumbnail', '')) for res in initial_deep_results_data]
+        initial_deep_results = []
+        if category == 'industrial_parts':
+            initial_deep_results = self.search_with_ai_verification(final_query, category)
 
         all_initial_results = initial_shopping_results + initial_deep_results
         
@@ -332,62 +333,69 @@ function performSearch() {
     loadingDiv.style.display = "block", resultsSection.style.display = "none", productsGrid.innerHTML = "", suggestionsDiv.innerHTML = "";
     fetch("{{ url_for('api_search') }}", { method: "POST", body: formData }).then(response => response.json()).then(data => {
         loadingDiv.style.display = "none";
-        if (data.results && data.results.length > 0) {
-            // GÉNESIS: Separar resultados para mostrarlos por separado
-            const directResults = data.results.filter(p => !p.is_compatible);
-            const compatibleResults = data.results.filter(p => p.is_compatible);
-            let html = "";
+        productsGrid.innerHTML = ""; // Limpiar resultados anteriores
+        suggestionsDiv.innerHTML = ""; // Limpiar sugerencias anteriores
 
-            if (directResults.length > 0) {
-                document.getElementById('results-title').textContent = "Mejores Ofertas Encontradas";
-                directResults.forEach(product => {
-                    html += `
-                        <div class="product-card">
-                            <div class="product-image"><img src="${product.image_url || 'https://via.placeholder.com/300'}" alt="${product.name}" onerror="this.onerror=null;this.src='https://via.placeholder.com/300';"></div>
-                            <div class="product-info">
-                                <div class="product-title">${product.name}</div>
-                                <div class="price-store-wrapper">
-                                    <div class="current-price">$${product.price.toFixed(2)}</div>
-                                    <div class="store-link"><a href="${product.url}" target="_blank">Ver en ${product.store}</a></div>
-                                </div>
+        const directResults = data.results.filter(p => !p.is_compatible);
+        const compatibleResults = data.results.filter(p => p.is_compatible);
+
+        if (directResults.length > 0) {
+            document.getElementById('results-title').textContent = "Mejores Ofertas Encontradas";
+            directResults.forEach(product => {
+                productsGrid.innerHTML += `
+                    <div class="product-card">
+                        <div class="product-image"><img src="${product.image_url || 'https://via.placeholder.com/300'}" alt="${product.name}" onerror="this.onerror=null;this.src='https://via.placeholder.com/300';"></div>
+                        <div class="product-info">
+                            <div class="product-title">${product.name}</div>
+                            <div class="price-store-wrapper">
+                                <div class="current-price">$${product.price.toFixed(2)}</div>
+                                <div class="store-link"><a href="${product.url}" target="_blank">Ver en ${product.store}</a></div>
                             </div>
-                        </div>`;
-                });
-            }
-
-            if (compatibleResults.length > 0) {
-                html += `<h3 style="grid-column: 1 / -1; text-align: center; margin-top: 40px; width: 100%;">Reemplazos y Piezas Compatibles Encontradas</h3>`;
-                compatibleResults.forEach(product => {
-                    html += `
-                        <div class="product-card">
-                            <div class="product-image"><img src="${product.image_url || 'https://via.placeholder.com/300'}" alt="${product.name}" onerror="this.onerror=null;this.src='https://via.placeholder.com/300';"></div>
-                            <div class="product-info">
-                                <div class="product-title">${product.name}</div>
-                                <div class="price-store-wrapper">
-                                    <div class="current-price">$${product.price.toFixed(2)}</div>
-                                    <div class="store-link"><a href="${product.url}" target="_blank">Ver en ${product.store}</a></div>
-                                </div>
-                            </div>
-                        </div>`;
-                });
-            }
-            productsGrid.innerHTML = html;
-
-        } else if (data.suggestions && data.suggestions.length > 0) {
-            let suggestionsHTML = '<h3>No encontramos resultados. ¿Quizás quisiste decir...?</h3>';
-            data.suggestions.forEach(suggestion => { suggestionsHTML += `<button class="suggestion-btn">${suggestion}</button>`; });
-            suggestionsDiv.innerHTML = suggestionsHTML;
-            document.querySelectorAll('.suggestion-btn').forEach(button => {
-                button.addEventListener('click', () => {
-                    queryInput.value = button.textContent, imageInput.value = "", document.getElementById("image-preview-container").style.display = "none", performSearch();
-                });
+                        </div>
+                    </div>`;
             });
-        } else {
-            productsGrid.innerHTML = "<p>No se encontraron resultados para tu búsqueda.</p>";
+        }
+
+        if (compatibleResults.length > 0) {
+            productsGrid.innerHTML += `<h3 style="grid-column: 1 / -1; text-align: center; margin-top: 40px; width: 100%;">Reemplazos y Piezas Compatibles Encontradas</h3>`;
+            compatibleResults.forEach(product => {
+                productsGrid.innerHTML += `
+                    <div class="product-card">
+                        <div class="product-image"><img src="${product.image_url || 'https://via.placeholder.com/300'}" alt="${product.name}" onerror="this.onerror=null;this.src='https://via.placeholder.com/300';"></div>
+                        <div class="product-info">
+                            <div class="product-title">${product.name}</div>
+                            <div class="price-store-wrapper">
+                                <div class="current-price">$${product.price.toFixed(2)}</div>
+                                <div class="store-link"><a href="${product.url}" target="_blank">Ver en ${product.store}</a></div>
+                            </div>
+                        </div>
+                    </div>`;
+            });
+        }
+        
+        if (directResults.length === 0 && compatibleResults.length === 0) {
+             if (data.suggestions && data.suggestions.length > 0) {
+                let suggestionsHTML = '<h3>No encontramos resultados. ¿Quizás quisiste decir...?</h3>';
+                data.suggestions.forEach(suggestion => { suggestionsHTML += `<button class="suggestion-btn">${suggestion}</button>`; });
+                suggestionsDiv.innerHTML = suggestionsHTML;
+                document.querySelectorAll('.suggestion-btn').forEach(button => {
+                    button.addEventListener('click', () => {
+                        queryInput.value = button.textContent;
+                        imageInput.value = "";
+                        document.getElementById("image-preview-container").style.display = "none";
+                        performSearch();
+                    });
+                });
+            } else {
+                productsGrid.innerHTML = "<p>No se encontraron resultados para tu búsqueda.</p>";
+            }
         }
         resultsSection.style.display = "block";
     }).catch(error => {
-        console.error("Error:", error), loadingDiv.style.display = "none", productsGrid.innerHTML = "<p>Ocurrió un error durante la búsqueda. Por favor, intenta de nuevo.</p>", resultsSection.style.display = "block";
+        console.error("Error:", error);
+        loadingDiv.style.display = "none";
+        productsGrid.innerHTML = "<p>Ocurrió un error durante la búsqueda. Por favor, intenta de nuevo.</p>";
+        resultsSection.style.display = "block";
     });
 }
 searchForm.addEventListener("submit", function(e) { e.preventDefault(), performSearch(); });
