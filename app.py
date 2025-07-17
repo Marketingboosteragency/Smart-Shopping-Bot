@@ -6,7 +6,7 @@
 # Novedades:
 # - Prioridad absoluta a Google Shopping para obtener resultados baratos, rápidos y fiables.
 # - La búsqueda profunda con IA solo se activa como "Plan B" para piezas especializadas.
-# - Filtro geográfico estricto para eliminar dominios no estadounidenses.
+# - Lógica de clasificación de IA mejorada para manejar productos de uso general.
 # - Se garantiza una mayor cantidad de resultados ordenados por el mejor precio.
 # ==============================================================================
 
@@ -85,14 +85,16 @@ def _get_product_category(query: str) -> str:
     if not genai: return "consumer_tech"
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = (f"Classify the following product search query. Is it for 'industrial_parts' or 'consumer_tech'? Query: '{query}'. Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
+        prompt = (f"Classify the following product search query. The categories are 'industrial_parts' (highly specialized machinery, unique car engine parts, complex components) or 'consumer_tech' (electronics, tools, items also sold to the general public like tape or screws). "
+                  f"Query: '{query}'. "
+                  "If it could be both (like tape), default to 'consumer_tech'. Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
         response = model.generate_content(prompt)
         category = response.text.strip()
         return category if category in ["industrial_parts", "consumer_tech"] else "consumer_tech"
     except Exception:
         return "consumer_tech"
 
-def _verify_is_product_page(query: str, page_title: str, page_content: str, category: str) -> bool:
+def _verify_is_product_page(query: str, page_title: str, page_content: str) -> bool:
     if not genai: return True
     prompt_template = (f"You are a verification analyst. User search: '{query}'. Page title: '{page_title}'. Is this a retail page for the main product, not an accessory or article? Answer YES or NO.")
     try:
@@ -118,7 +120,6 @@ def _get_clean_company_name(item: Dict) -> str:
     except: return "Tienda"
 
 def _is_usa_domain(url: str) -> bool:
-    """Verifica si el dominio de una URL es comúnmente de EE. UU."""
     try:
         domain = urlparse(url).netloc
         allowed_tlds = ['.com', '.net', '.org', '.us', '.gov', '.edu', '.io', '.co']
@@ -173,7 +174,7 @@ class SmartShoppingBot:
                         price_str = item.get('extracted_price', item['price'])
                         price_float = float(re.sub(r'[^\d.]', '', str(price_str)))
                         if price_float >= 0.99 and _is_usa_domain(item['link']):
-                            products.append(ProductResult(name=item['title'], price=price_float, store=item.get('source', 'Google'), url=item['link'], image_url=item.get('thumbnail', '')))
+                            products.append(ProductResult(name=item['title'], price=price_float, store=item.get('source', 'Google Shopping'), url=item['link'], image_url=item.get('thumbnail', '')))
                     except (ValueError, TypeError): continue
             print(f"✅ Google Shopping encontró {len(products)} resultados válidos.")
             return products
@@ -181,17 +182,15 @@ class SmartShoppingBot:
             print(f"❌ Ocurrió un error en Google Shopping: {e}"); return []
 
     def search_with_ai_verification(self, query: str, category: str) -> List[ProductResult]:
-        search_query = f'{query} supplier USA' if category == 'industrial_parts' else f'{query} price USA'
-        print(f"--- Iniciando búsqueda profunda ({category}): '{search_query}' ---")
+        search_query = f'{query} supplier USA'
+        print(f"--- Iniciando búsqueda profunda (Industrial): '{search_query}' ---")
         params = {"q": search_query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "num": "20", "api_key": self.serpapi_key}
         try:
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=45)
             response.raise_for_status()
             initial_results = response.json().get('organic_results', [])
             usa_results = [item for item in initial_results if _is_usa_domain(item.get('link', ''))]
-            blacklist = ['alibaba.com', 'aliexpress.com', 'made-in-china.com']
-            if category == "industrial_parts":
-                blacklist.extend(['amazon.com', 'walmart.com', 'ebay.com', 'etsy.com', 'pinterest.com'])
+            blacklist = ['alibaba.com', 'aliexpress.com', 'made-in-china.com', 'amazon.com', 'walmart.com', 'ebay.com']
             filtered_results = [item for item in usa_results if not any(site in item.get('link', '') for site in blacklist)]
             
             valid_results = []
@@ -223,11 +222,13 @@ class SmartShoppingBot:
         category = _get_product_category(final_query)
         print(f"🔍 Lanzando búsqueda (Shopping First - {category}) para: '{final_query}'")
         
+        # Prioridad #1: Siempre buscar en Google Shopping
         shopping_results = self.search_google_shopping(final_query)
         
+        # Prioridad #2: Búsqueda profunda solo como Plan B para piezas industriales
         deep_search_results = []
         if len(shopping_results) < 5 and category == 'industrial_parts':
-            print("🛍️ Pocos resultados en Shopping, activando búsqueda profunda como Plan B...")
+            print("🛍️ Pocos resultados en Shopping, activando búsqueda profunda como refuerzo...")
             deep_search_results = self.search_with_ai_verification(final_query, category)
         
         all_results = shopping_results + deep_search_results
