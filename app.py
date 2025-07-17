@@ -1,12 +1,12 @@
-# app.py (versión 16.0 - Motor Ultra-Fiable de Google Shopping)
+# app.py (versión 16.0 - Motor de Búsqueda por Capas)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 16.0 (Ultra-Reliable Shopping Engine)
+# Versión: 16.0 (Layered Search Engine)
 # Novedades:
-# - Se elimina por completo el scraping para máxima velocidad y fiabilidad.
-# - El motor de búsqueda se basa 100% en la API de Google Shopping de SerpApi.
-# - Garantiza resultados precisos, baratos y geo-localizados para cualquier producto.
+# - Se implementa una estrategia de búsqueda por capas: primero específica, luego genérica.
+# - La IA genera múltiples consultas para maximizar las posibilidades de encontrar resultados.
+# - Se prioriza siempre Google Shopping para garantizar velocidad y fiabilidad.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -14,11 +14,14 @@ import requests
 import re
 import json
 import os
+import time
 import io
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from fake_useragent import UserAgent
+from bs4 import BeautifulSoup
 from flask import Flask, request, render_template_string, jsonify, session, redirect, url_for, flash
 from PIL import Image
 
@@ -51,105 +54,99 @@ if genai and GEMINI_API_KEY:
         genai = None
 
 # ==============================================================================
-# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (SIMPLIFICADA Y ROBUSTA)
+# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (CON BÚSQUEDA POR CAPAS)
 # ==============================================================================
 
 @dataclass
 class ProductResult:
-    name: str
-    price: float
-    store: str
-    url: str
-    image_url: str = ""
+    name: str; price: float; store: str; url: str; image_url: str = ""
 
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
 
-    def get_descriptive_query_from_image(self, image_content: bytes) -> Optional[str]:
+    # GÉNESIS: La IA ahora genera una lista de consultas, de la más específica a la más general
+    def get_search_queries_from_image(self, image_content: bytes) -> List[str]:
         if not genai:
             print("  ❌ Análisis con Gemini Vision saltado: Modelo no configurado.")
-            return None
-        print("  🧠 Analizando imagen con Gemini Vision...")
+            return []
+        print("  🧠 Analizando imagen con Gemini Vision para generar múltiples consultas...")
         try:
             image_pil = Image.open(io.BytesIO(image_content))
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            prompt = """You are an expert in identifying products. Analyze the image and generate a specific, effective search query in English to find this product for sale online. Respond ONLY with the search query."""
+            prompt = """You are an expert product identifier. Analyze the image and provide a JSON list of 3 search queries to find it online, from most specific to most general.
+            Example for a car part: ["brand model specific part name", "automotive part type", "metal part"]
+            Example for a phone: ["iPhone 15 Pro blue 256GB", "iPhone 15 Pro", "Apple smartphone"]
+            Respond ONLY with the JSON list of strings.
+            """
             response = model.generate_content([prompt, image_pil])
-            query = response.text.strip().replace("*", "")
-            print(f"  ✅ Consulta experta generada por Gemini Vision: '{query}'")
-            return query
+            # Limpiar y parsear la respuesta JSON
+            cleaned_response = response.text.strip().replace("```json", "").replace("```", "")
+            queries = json.loads(cleaned_response)
+            print(f"  ✅ Consultas generadas por Gemini Vision: {queries}")
+            return queries
         except Exception as e:
             print(f"  ❌ Fallo CRÍTICO en análisis con Gemini Vision: {e}")
-            return None
-
-    def _combine_text_and_image_query(self, text_query: str, image_query: str) -> str:
-        if not genai: return f"{text_query} {image_query}"
-        try:
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            prompt = f"Combine these into a single, effective search query. User's text: '{text_query}'. Description from image: '{image_query}'. Respond only with the final query."
-            response = model.generate_content(prompt)
-            return response.text.strip()
-        except Exception:
-            return f"{text_query} {image_query}"
+            return []
 
     def search_product(self, query: str = None, image_content: bytes = None) -> List[ProductResult]:
-        text_query = query.strip() if query else None
-        image_query = self.get_descriptive_query_from_image(image_content) if image_content else None
+        search_queries = []
+        if query:
+            # Si hay texto, esa es nuestra consulta principal y más fiable
+            search_queries.append(query)
+        elif image_content:
+            # Si hay imagen, usamos la IA para generar una lista de posibles consultas
+            search_queries = self.get_search_queries_from_image(image_content)
         
-        final_query = None
-        if text_query and image_query:
-            final_query = self._combine_text_and_image_query(text_query, image_query)
-        elif text_query:
-            final_query = text_query
-        elif image_query:
-            final_query = image_query
-
-        if not final_query:
+        if not search_queries:
             print("❌ No se pudo determinar una consulta válida.")
             return []
 
-        print(f"🚀 Lanzando búsqueda en Google Shopping para: '{final_query}'")
-        
-        params = {
-            "q": final_query,
-            "engine": "google_shopping",
-            "location": "United States",
-            "gl": "us",
-            "hl": "en",
-            "num": "100",
-            "api_key": self.serpapi_key
-        }
-        
-        try:
-            response = requests.get("https://serpapi.com/search.json", params=params, timeout=30)
-            response.raise_for_status()
+        all_results = []
+        # GÉNESIS: Estrategia de búsqueda por capas
+        for i, current_query in enumerate(search_queries):
+            print(f"🔍 Capa de Búsqueda {i+1}/{len(search_queries)}: Probando con '{current_query}'")
             
-            products = []
-            for item in response.json().get('shopping_results', []):
-                if all(k in item for k in ['price', 'title', 'link', 'source']):
-                    try:
-                        price_str = item.get('extracted_price', item['price'])
-                        price_float = float(re.sub(r'[^\d.]', '', str(price_str)))
-                        
-                        if price_float >= 0.99:
-                             products.append(ProductResult(
-                                name=item['title'],
-                                price=price_float,
-                                store=item['source'],
-                                url=item['link'],
-                                image_url=item.get('thumbnail', '')
-                            ))
-                    except (ValueError, TypeError):
-                        continue
+            # Siempre buscamos en Google Shopping por su fiabilidad
+            params = {"q": current_query, "engine": "google_shopping", "location": "United States", "gl": "us", "hl": "en", "num": "100", "api_key": self.serpapi_key}
             
-            products.sort(key=lambda x: x.price)
-            print(f"✅ Búsqueda finalizada. Se encontraron {len(products)} resultados válidos en Google Shopping.")
-            return products
+            try:
+                response = requests.get("https://serpapi.com/search.json", params=params, timeout=30)
+                response.raise_for_status()
+                
+                for item in response.json().get('shopping_results', []):
+                    if all(k in item for k in ['price', 'title', 'link', 'source']):
+                        try:
+                            price_str = item.get('extracted_price', item['price'])
+                            price_float = float(re.sub(r'[^\d.]', '', str(price_str)))
+                            if price_float >= 0.99:
+                                all_results.append(ProductResult(name=item['title'], price=price_float, store=item['source'], url=item['link'], image_url=item.get('thumbnail', '')))
+                        except (ValueError, TypeError):
+                            continue
+                
+                # Si encontramos suficientes resultados en esta capa, no necesitamos seguir
+                if len(all_results) >= 10:
+                    print(f"  ✅ Suficientes resultados encontrados en esta capa. Finalizando búsqueda.")
+                    break
+            
+            except Exception as e:
+                print(f"  ❌ Ocurrió un error en la capa de búsqueda {i+1}: {e}")
+                continue # Pasamos a la siguiente consulta si esta falla
 
-        except Exception as e:
-            print(f"❌ Ocurrió un error en la búsqueda de Google Shopping: {e}")
+        if not all_results:
             return []
+
+        # Deduplicar y ordenar la lista final de resultados
+        seen_urls = set()
+        unique_results = []
+        for product in all_results:
+            if product.url not in seen_urls:
+                unique_results.append(product)
+                seen_urls.add(product.url)
+        
+        unique_results.sort(key=lambda x: x.price)
+        print(f"✅ Búsqueda finalizada. Se encontraron {len(unique_results)} resultados únicos.")
+        return unique_results
 
 # ==============================================================================
 # SECCIÓN 3: RUTAS FLASK Y EJECUCIÓN
@@ -194,10 +191,9 @@ def api_search():
     query = request.form.get('query')
     image_file = request.files.get('image_file')
     image_content = image_file.read() if image_file and image_file.filename != '' else None
-    # GÉNESIS: La función ahora solo devuelve resultados, no sugerencias.
     results = shopping_bot.search_product(query=query, image_content=image_content)
     results_dicts = [res.__dict__ for res in results]
-    # No hay sugerencias si la búsqueda principal falla, se muestra un mensaje genérico.
+    # Ya no se manejan sugerencias, el frontend mostrará "no se encontraron resultados" si la lista está vacía
     return jsonify(results=results_dicts, suggestions=[])
 
 # ==============================================================================
@@ -217,6 +213,7 @@ function performSearch() {
     fetch("{{ url_for('api_search') }}", { method: "POST", body: formData }).then(response => response.json()).then(data => {
         loadingDiv.style.display = "none";
         if (data.results && data.results.length > 0) {
+            document.getElementById('results-title').textContent = "Mejores Ofertas Encontradas";
             data.results.forEach(product => {
                 productsGrid.innerHTML += `
                     <div class="product-card">
@@ -231,6 +228,7 @@ function performSearch() {
                     </div>`;
             });
         } else if (data.suggestions && data.suggestions.length > 0) {
+            document.getElementById('results-title').textContent = "Resultados no encontrados";
             let suggestionsHTML = '<h3>No encontramos resultados. ¿Quizás quisiste decir...?</h3>';
             data.suggestions.forEach(suggestion => { suggestionsHTML += `<button class="suggestion-btn">${suggestion}</button>`; });
             suggestionsDiv.innerHTML = suggestionsHTML;
@@ -240,6 +238,7 @@ function performSearch() {
                 });
             });
         } else {
+            document.getElementById('results-title').textContent = "Resultados no encontrados";
             productsGrid.innerHTML = "<p>No se encontraron resultados para tu búsqueda.</p>";
         }
         resultsSection.style.display = "block";
