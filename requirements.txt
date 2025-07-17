@@ -1,7 +1,10 @@
+# Flask y librerías web
 Flask==3.0.3
 requests==2.32.3
 gunicorn==22.0.0
-fake-useragent==1.5.1
-beautifulsoup4==4.12.3
+
+# Librerías de utilidades
 Pillow==10.4.0
+
+# API de Google
 google-generativeai==0.7.1
