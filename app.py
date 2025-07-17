@@ -1,12 +1,10 @@
-# app.py (versión 16.1 - Regreso al Motor Ultra-Fiable de Google Shopping)
-
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 16.1 (Return to Ultra-Reliable Shopping Engine)
+# Versión: 16.2 (Depuración Mejorada del Motor de Búsqueda)
 # Novedades:
-# - Se vuelve a una arquitectura simple y robusta para garantizar resultados.
-# - El motor de búsqueda se basa 100% en la API de Google Shopping.
-# - Se mantiene el análisis de imagen experto con Gemini Vision.
+# - Se añade lógica de depuración robusta para la API de Google Shopping.
+# - Se imprimen mensajes de error claros si SerpApi falla o no devuelve resultados.
+# - Se mantiene la arquitectura fiable de la v16.1.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -49,7 +47,7 @@ if genai and GEMINI_API_KEY:
         genai = None
 
 # ==============================================================================
-# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (SIMPLIFICADA Y ROBUSTA)
+# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (CON DEPURACIÓN MEJORADA)
 # ==============================================================================
 
 @dataclass
@@ -62,6 +60,8 @@ class ProductResult:
 
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
+        if not serpapi_key:
+            print("❌ ALERTA CRÍTICA: La variable de entorno SERPAPI_KEY no está configurada.")
         self.serpapi_key = serpapi_key
 
     def get_descriptive_query_from_image(self, image_content: bytes) -> Optional[str]:
@@ -85,6 +85,10 @@ class SmartShoppingBot:
         return f"{text_query} {image_query}"
 
     def search_product(self, query: str = None, image_content: bytes = None) -> List[ProductResult]:
+        if not self.serpapi_key:
+            print("❌ Búsqueda cancelada: La clave de API de SerpApi no está disponible.")
+            return []
+            
         text_query = query.strip() if query else None
         image_query = self.get_descriptive_query_from_image(image_content) if image_content else None
         
@@ -97,7 +101,7 @@ class SmartShoppingBot:
             final_query = image_query
 
         if not final_query:
-            print("❌ No se pudo determinar una consulta válida.")
+            print("❌ No se pudo determinar una consulta de búsqueda válida.")
             return []
 
         print(f"🚀 Lanzando búsqueda en Google Shopping para: '{final_query}'")
@@ -114,10 +118,22 @@ class SmartShoppingBot:
         
         try:
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=30)
-            response.raise_for_status()
+            response.raise_for_status()  # Lanza un error para respuestas 4xx/5xx
             
+            data = response.json()
+            shopping_results = data.get('shopping_results', [])
+
+            # --- NUEVA LÓGICA DE DEPURACIÓN ---
+            if not shopping_results:
+                print("⚠️ No se encontró la clave 'shopping_results' en la respuesta de SerpApi o estaba vacía.")
+                print("   Esto puede deberse a una clave API inválida, falta de créditos o ningún resultado real.")
+                print("   Respuesta completa de la API:", json.dumps(data, indent=2))
+                return []
+            # --- FIN DE LA LÓGICA DE DEPURACIÓN ---
+            
+            print(f"  🔍 Recibidos {len(shopping_results)} resultados brutos de SerpApi. Procesando...")
             products = []
-            for item in response.json().get('shopping_results', []):
+            for item in shopping_results:
                 if all(k in item for k in ['price', 'title', 'link', 'source']):
                     try:
                         price_str = item.get('extracted_price', item['price'])
@@ -132,18 +148,24 @@ class SmartShoppingBot:
                                 image_url=item.get('thumbnail', '')
                             ))
                     except (ValueError, TypeError):
+                        # Ignora productos con un formato de precio inválido
                         continue
             
             products.sort(key=lambda x: x.price)
-            print(f"✅ Búsqueda finalizada. Se encontraron {len(products)} resultados válidos en Google Shopping.")
+            print(f"✅ Búsqueda finalizada. Se procesaron {len(products)} resultados válidos.")
             return products
 
+        except requests.exceptions.HTTPError as e:
+            print(f"❌ Ocurrió un error HTTP con SerpApi: {e}")
+            print(f"   Respuesta del servidor: {e.response.text}")
+            return []
         except Exception as e:
-            print(f"❌ Ocurrió un error en la búsqueda de Google Shopping: {e}")
+            print(f"❌ Ocurrió un error inesperado en la búsqueda de Google Shopping: {e}")
             return []
 
+
 # ==============================================================================
-# SECCIÓN 3: RUTAS FLASK Y EJECUCIÓN
+# SECCIÓN 3: RUTAS FLASK Y EJECUCIÓN (Sin cambios)
 # ==============================================================================
 shopping_bot = SmartShoppingBot(SERPAPI_KEY)
 
@@ -190,7 +212,7 @@ def api_search():
     return jsonify(results=results_dicts, suggestions=[])
 
 # ==============================================================================
-# SECCIÓN 4: PLANTILLAS HTML Y EJECUCIÓN
+# SECCIÓN 4: PLANTILLAS HTML Y EJECUCIÓN (Sin cambios)
 # ==============================================================================
 AUTH_TEMPLATE_LOGIN_ONLY = """
 <!DOCTYPE html>
@@ -224,7 +246,7 @@ function performSearch() {
             });
         } else {
             document.getElementById('results-title').textContent = "Resultados no encontrados";
-            productsGrid.innerHTML = "<p>No se encontraron resultados para tu búsqueda.</p>";
+            productsGrid.innerHTML = "<p>No se encontraron resultados para tu búsqueda. Revisa la consola del servidor para más detalles si el problema persiste.</p>";
         }
         resultsSection.style.display = "block";
     }).catch(error => {
