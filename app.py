@@ -108,7 +108,7 @@ class SmartShoppingBot:
             "location": "United States",
             "gl": "us",
             "hl": "en",
-            "num": "100",
+            "num": "100",  # Pedimos hasta 100 resultados para tener una buena selección
             "api_key": self.serpapi_key
         }
         
@@ -123,7 +123,7 @@ class SmartShoppingBot:
                         price_str = item.get('extracted_price', item['price'])
                         price_float = float(re.sub(r'[^\d.]', '', str(price_str)))
                         
-                        if price_float >= 0.01:
+                        if price_float >= 0.99:
                              products.append(ProductResult(
                                 name=item['title'],
                                 price=price_float,
@@ -219,16 +219,6 @@ function performSearch() {
                             </div>
                         </div>
                     </div>`;
-            });
-        } else if (data.suggestions && data.suggestions.length > 0) {
-            document.getElementById('results-title').textContent = "Resultados no encontrados";
-            let suggestionsHTML = '<h3>No encontramos resultados. ¿Quizás quisiste decir...?</h3>';
-            data.suggestions.forEach(suggestion => { suggestionsHTML += `<button class="suggestion-btn">${suggestion}</button>`; });
-            suggestionsDiv.innerHTML = suggestionsHTML;
-            document.querySelectorAll('.suggestion-btn').forEach(button => {
-                button.addEventListener('click', () => {
-                    queryInput.value = button.textContent, imageInput.value = "", document.getElementById("image-preview-container").style.display = "none", performSearch();
-                });
             });
         } else {
             document.getElementById('results-title').textContent = "Resultados no encontrados";
