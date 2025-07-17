@@ -4,7 +4,7 @@
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
 # Versión: 16.0 (Ultra-Reliable Shopping Engine)
 # Novedades:
-# - Se elimina por completo el scraping y la IA de verificación para máxima velocidad y fiabilidad.
+# - Se elimina por completo el scraping para máxima velocidad y fiabilidad.
 # - El motor de búsqueda se basa 100% en la API de Google Shopping.
 # - Garantiza resultados precisos, baratos y geo-localizados para cualquier producto.
 # ==============================================================================
@@ -82,7 +82,6 @@ class SmartShoppingBot:
             return None
 
     def _combine_text_and_image_query(self, text_query: str, image_query: str) -> str:
-        # Esta función ahora es más simple, ya que la IA es la principal fuente de inteligencia
         return f"{text_query} {image_query}"
 
     def search_product(self, query: str = None, image_content: bytes = None) -> List[ProductResult]:
@@ -109,7 +108,7 @@ class SmartShoppingBot:
             "location": "United States",
             "gl": "us",
             "hl": "en",
-            "num": "100",  # Pedimos hasta 100 resultados para tener una buena selección
+            "num": "100",
             "api_key": self.serpapi_key
         }
         
@@ -119,13 +118,12 @@ class SmartShoppingBot:
             
             products = []
             for item in response.json().get('shopping_results', []):
-                # Verificación rigurosa de que el item es válido y tiene precio
                 if all(k in item for k in ['price', 'title', 'link', 'source']):
                     try:
                         price_str = item.get('extracted_price', item['price'])
                         price_float = float(re.sub(r'[^\d.]', '', str(price_str)))
                         
-                        if price_float >= 0.99:
+                        if price_float >= 0.01:
                              products.append(ProductResult(
                                 name=item['title'],
                                 price=price_float,
@@ -189,7 +187,7 @@ def api_search():
     image_content = image_file.read() if image_file and image_file.filename != '' else None
     results = shopping_bot.search_product(query=query, image_content=image_content)
     results_dicts = [res.__dict__ for res in results]
-    return jsonify(results=results_dicts, suggestions=[]) # Ya no se generan sugerencias
+    return jsonify(results=results_dicts, suggestions=[])
 
 # ==============================================================================
 # SECCIÓN 4: PLANTILLAS HTML Y EJECUCIÓN
@@ -221,6 +219,16 @@ function performSearch() {
                             </div>
                         </div>
                     </div>`;
+            });
+        } else if (data.suggestions && data.suggestions.length > 0) {
+            document.getElementById('results-title').textContent = "Resultados no encontrados";
+            let suggestionsHTML = '<h3>No encontramos resultados. ¿Quizás quisiste decir...?</h3>';
+            data.suggestions.forEach(suggestion => { suggestionsHTML += `<button class="suggestion-btn">${suggestion}</button>`; });
+            suggestionsDiv.innerHTML = suggestionsHTML;
+            document.querySelectorAll('.suggestion-btn').forEach(button => {
+                button.addEventListener('click', () => {
+                    queryInput.value = button.textContent, imageInput.value = "", document.getElementById("image-preview-container").style.display = "none", performSearch();
+                });
             });
         } else {
             document.getElementById('results-title').textContent = "Resultados no encontrados";
