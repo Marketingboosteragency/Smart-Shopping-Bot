@@ -1,12 +1,11 @@
-# app.py (versión 16.1 - Regreso al Motor Ultra-Fiable de Google Shopping)
+# app.py (versión 16.2 - Motor con Plan B y Diagnóstico Mejorado)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 16.1 (Return to Ultra-Reliable Shopping Engine)
+# Versión: 16.2 (Fallback Search & Enhanced Diagnostics)
 # Novedades:
-# - Se vuelve a una arquitectura simple y robusta para garantizar resultados.
-# - El motor de búsqueda se basa 100% en la API de Google Shopping.
-# - Se mantiene el análisis de imagen experto con Gemini Vision.
+# - Se añade una búsqueda orgánica en Google como "Plan B" si Google Shopping falla.
+# - Se añade logging de diagnóstico para respuestas vacías de SerpApi.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -49,7 +48,7 @@ if genai and GEMINI_API_KEY:
         genai = None
 
 # ==============================================================================
-# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (SIMPLIFICADA Y ROBUSTA)
+# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (CON PLAN B)
 # ==============================================================================
 
 @dataclass
@@ -65,9 +64,7 @@ class SmartShoppingBot:
         self.serpapi_key = serpapi_key
 
     def get_descriptive_query_from_image(self, image_content: bytes) -> Optional[str]:
-        if not genai:
-            print("  ❌ Análisis con Gemini Vision saltado: Modelo no configurado.")
-            return None
+        if not genai: print("  ❌ Análisis con Gemini Vision saltado."); return None
         print("  🧠 Analizando imagen con Gemini Vision...")
         try:
             image_pil = Image.open(io.BytesIO(image_content))
@@ -78,8 +75,7 @@ class SmartShoppingBot:
             print(f"  ✅ Consulta experta generada por Gemini Vision: '{query}'")
             return query
         except Exception as e:
-            print(f"  ❌ Fallo CRÍTICO en análisis con Gemini Vision: {e}")
-            return None
+            print(f"  ❌ Fallo CRÍTICO en análisis con Gemini Vision: {e}"); return None
 
     def _combine_text_and_image_query(self, text_query: str, image_query: str) -> str:
         return f"{text_query} {image_query}"
@@ -89,58 +85,51 @@ class SmartShoppingBot:
         image_query = self.get_descriptive_query_from_image(image_content) if image_content else None
         
         final_query = None
-        if text_query and image_query:
-            final_query = self._combine_text_and_image_query(text_query, image_query)
-        elif text_query:
-            final_query = text_query
-        elif image_query:
-            final_query = image_query
+        if text_query and image_query: final_query = self._combine_text_and_image_query(text_query, image_query)
+        elif text_query: final_query = text_query
+        elif image_query: final_query = image_query
 
-        if not final_query:
-            print("❌ No se pudo determinar una consulta válida.")
-            return []
+        if not final_query: print("❌ No se pudo determinar una consulta válida."); return []
 
         print(f"🚀 Lanzando búsqueda en Google Shopping para: '{final_query}'")
+        params = {"q": final_query, "engine": "google_shopping", "location": "United States", "gl": "us", "hl": "en", "num": "100", "api_key": self.serpapi_key}
         
-        params = {
-            "q": final_query,
-            "engine": "google_shopping",
-            "location": "United States",
-            "gl": "us",
-            "hl": "en",
-            "num": "100",
-            "api_key": self.serpapi_key
-        }
-        
+        products = []
         try:
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=30)
             response.raise_for_status()
-            
-            products = []
-            for item in response.json().get('shopping_results', []):
+            shopping_results = response.json().get('shopping_results', [])
+
+            # GÉNESIS: Log de diagnóstico
+            if not shopping_results:
+                print("⚠️ SerpApi devolvió una respuesta válida pero sin 'shopping_results'. Verifique su plan de SerpApi o la consulta.")
+
+            for item in shopping_results:
                 if all(k in item for k in ['price', 'title', 'link', 'source']):
                     try:
                         price_str = item.get('extracted_price', item['price'])
                         price_float = float(re.sub(r'[^\d.]', '', str(price_str)))
-                        
                         if price_float >= 0.01:
-                             products.append(ProductResult(
-                                name=item['title'],
-                                price=price_float,
-                                store=item['source'],
-                                url=item['link'],
-                                image_url=item.get('thumbnail', '')
-                            ))
-                    except (ValueError, TypeError):
-                        continue
-            
-            products.sort(key=lambda x: x.price)
-            print(f"✅ Búsqueda finalizada. Se encontraron {len(products)} resultados válidos en Google Shopping.")
-            return products
-
+                             products.append(ProductResult(name=item['title'], price=price_float, store=item['source'], url=item['link'], image_url=item.get('thumbnail', '')))
+                    except (ValueError, TypeError): continue
         except Exception as e:
             print(f"❌ Ocurrió un error en la búsqueda de Google Shopping: {e}")
-            return []
+        
+        # GÉNESIS: Plan B - Si Google Shopping falla o no devuelve nada, hacemos una búsqueda orgánica.
+        if not products:
+            print("🛍️ Google Shopping no devolvió resultados. Activando Plan B: Búsqueda Orgánica.")
+            try:
+                params_organic = {"q": final_query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "api_key": self.serpapi_key}
+                response_organic = requests.get("https://serpapi.com/search.json", params=params_organic, timeout=20)
+                response_organic.raise_for_status()
+                for item in response_organic.json().get('organic_results', [])[:10]: # Tomamos los 10 primeros
+                    products.append(ProductResult(name=item['title'], price=0.0, store=item.get('source', 'Web'), url=item['link'], image_url=item.get('thumbnail', '')))
+            except Exception as e:
+                print(f"❌ Ocurrió un error en la búsqueda Orgánica (Plan B): {e}")
+
+        products.sort(key=lambda x: x.price)
+        print(f"✅ Búsqueda finalizada. Se encontraron {len(products)} resultados válidos.")
+        return products
 
 # ==============================================================================
 # SECCIÓN 3: RUTAS FLASK Y EJECUCIÓN
@@ -205,8 +194,6 @@ function performSearch() {
     loadingDiv.style.display = "block", resultsSection.style.display = "none", productsGrid.innerHTML = "", suggestionsDiv.innerHTML = "";
     fetch("{{ url_for('api_search') }}", { method: "POST", body: formData }).then(response => response.json()).then(data => {
         loadingDiv.style.display = "none";
-        productsGrid.innerHTML = ""; // Limpiar resultados anteriores
-        suggestionsDiv.innerHTML = ""; // Limpiar sugerencias anteriores
         if (data.results && data.results.length > 0) {
             document.getElementById('results-title').textContent = "Mejores Ofertas Encontradas";
             data.results.forEach(product => {
