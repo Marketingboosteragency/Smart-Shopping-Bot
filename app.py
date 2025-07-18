@@ -158,20 +158,20 @@ class SmartShoppingBot:
         tasks = []
         high_priority_stores = ["amazon.com", "walmart.com", "ebay.com", "target.com", "homedepot.com", "lowes.com", "grainger.com", "uline.com", "zoro.com"]
         
-        # Búsqueda Consolidada en Tiendas
+        # Búsqueda Consolidada en Tiendas (1 Tarea)
         store_query_part = " OR ".join([f"site:{store}" for store in high_priority_stores])
         store_query = f"({store_query_part}) \"{original_query}\""
         tasks.append({"query": store_query, "engine": "google", "start": 0})
 
-        # Búsqueda Orgánica (2 páginas)
+        # Búsqueda Orgánica (2 Tareas)
         for i in range(2): tasks.append({"query": base_query, "engine": "google", "start": i * 10})
         
-        # Búsqueda en Google Shopping
+        # Búsqueda en Google Shopping (1 Tarea)
         tasks.append({"query": base_query, "engine": "google_shopping", "start": 0})
 
         print(f"  🔥 Ejecutando {len(tasks)} tareas de búsqueda estratégicas en paralelo...")
         all_urls = set()
-        with ThreadPoolExecutor(max_workers=5) as executor: # MODIFICACIÓN: Reducir la concurrencia
+        with ThreadPoolExecutor(max_workers=5) as executor:
             future_to_task = {executor.submit(self._run_search_task, **task): task for task in tasks}
             for future in as_completed(future_to_task):
                 for url in future.result(): all_urls.add(url)
