@@ -320,15 +320,15 @@ SEARCH_TEMPLATE = """
             let isAlternative = data.results.length > 0 && data.results[0].is_alternative_suggestion;
             if (data.errors && data.errors.length > 0) {
                 let errorHTML = '<ul>';
-                data.errors.forEach(error => { errorHTML += `<li>${error}</li>`; });
+                data.errors.forEach(error => { errorHTML += `<li><strong>${error}</strong></li>`; });
                 errorHTML += '</ul>';
                 apiErrorsDiv.innerHTML = errorHTML;
                 apiErrorsDiv.style.display = "block";
                 resultsTitle.style.display = "none";
             }
-
+            
             if (isAlternative) {
-                resultsTitle.innerText = "No encontramos resultados exactos. Pero aquí hay algunas opciones similares:";
+                resultsTitle.innerText = "No encontramos resultados exactos, pero aquí hay algunas opciones similares:";
             } else {
                 resultsTitle.innerText = "Las Mejores Ofertas Encontradas";
             }
