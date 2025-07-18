@@ -1,11 +1,13 @@
-# app.py (versión 14.5 - Modo Ahorro de API)
+# app.py (versión 14.6 - Modo de Calidad)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 14.5 (API Saver Mode)
+# Versión: 14.6 (Quality Focus Mode)
 # Novedades:
-# - Se han eliminado las funciones de IA menos críticas (categorización, sugerencias, verificación de página) para reducir drásticamente el uso de la API y evitar errores de cuota.
-# - El uso de Gemini se centra ahora en el análisis de imágenes y la combinación de consultas.
+# - NUEVO: Se reintroduce la IA para mejorar la calidad de los resultados de forma eficiente.
+# - La consulta del usuario ahora se "mejora" con Gemini para hacerla más específica para compras.
+# - La verificación por IA de si una página es de un producto se reactiva, pero solo se usa si se encuentra un precio, para ahorrar cuota de API.
+# - Se implementa una categorización simple por palabras clave (sin IA) para decidir cuándo filtrar marketplaces.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -64,7 +66,7 @@ def _deep_scrape_content(url: str) -> Dict[str, Any]:
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
         price_text = "N/A"
-        price_selectors = ['[class*="price"]', '[id*="price"]', '[class*="Price"]', '[id*="Price"]']
+        price_selectors = ['[class*="price"]', '[id*="price"]', '[class*="Price"]', '[id*="Price"]', '[itemprop="price"]']
         for selector in price_selectors:
             price_tag = soup.select_one(selector)
             if price_tag:
@@ -78,6 +80,54 @@ def _deep_scrape_content(url: str) -> Dict[str, Any]:
         return {'title': title, 'text': text_content, 'price': price_text, 'image': image_url}
     except Exception:
         return {'title': 'N/A', 'text': '', 'price': 'N/A', 'image': ''}
+
+# --- NUEVA FUNCIÓN DE IA PARA MEJORAR LA CONSULTA ---
+def _enhance_query_for_purchase(text: str, errors_list: List[str]) -> str:
+    """Usa Gemini para convertir una consulta simple en una consulta de compra detallada en inglés."""
+    if not genai or not text: return text
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        prompt = f"A user wants to buy a product. Enhance and translate their search query into a specific, detailed English query suitable for finding the product for sale online. Include relevant keywords like size, type, or 'for sale'. User query: '{text}'. Respond ONLY with the enhanced English query."
+        response = model.generate_content(prompt)
+        enhanced_query = response.text.strip()
+        print(f"  🧠 Consulta mejorada por IA: de '{text}' a '{enhanced_query}'.")
+        return enhanced_query
+    except google_exceptions.ResourceExhausted as e:
+        error_msg = "Advertencia: Se superó la cuota de API de IA para mejorar la consulta. Usando texto original."
+        print(f"  ❌ {error_msg}")
+        if error_msg not in errors_list: errors_list.append(error_msg)
+        return text
+    except Exception as e:
+        print(f"  ❌ Error al mejorar la consulta: {e}. Usando texto original.")
+        return text
+
+# --- FUNCIÓN DE VERIFICACIÓN DE IA REACTIVADA ---
+def _verify_is_product_page(query: str, page_title: str, page_content: str, errors_list: List[str]) -> bool:
+    """Verifica si una página es una página de producto real usando IA."""
+    if not genai: return True
+    prompt_template = (f"You are a strict verification analyst. Based on the user's search and the page content, is this a direct retail page for the main product, and not just an accessory, a blog post, a review, or a forum discussion? User search: '{query}'. Page title: '{page_title}'. Page content snippet: '{page_content[:500]}'. Answer ONLY with YES or NO.")
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        response = model.generate_content(prompt_template)
+        is_product_page = "YES" in response.text.strip().upper()
+        if not is_product_page: print(f"  🤖 IA descartó página '{page_title}' por no ser de producto.")
+        return is_product_page
+    except google_exceptions.ResourceExhausted as e:
+        error_msg = "Advertencia: Se superó la cuota de API de IA para la verificación de páginas. Los resultados pueden ser menos precisos."
+        print(f"  ❌ {error_msg}")
+        if error_msg not in errors_list: errors_list.append(error_msg)
+        return False # Es más seguro descartar si no podemos verificar
+    except Exception: 
+        return False
+
+# --- CATEGORIZACIÓN SIMPLE POR PALABRAS CLAVE (SIN IA) ---
+def _get_simple_category(query: str) -> str:
+    """Determina si la consulta es para 'hardware/industrial' basado en palabras clave."""
+    hardware_keywords = ['tape', 'part', 'tool', 'engine', 'motor', 'bearing', 'screw', 'bolt', 'industrial', 'liquidators', 'supply', 'hardware']
+    if any(keyword in query.lower() for keyword in hardware_keywords):
+        print("  🔩 Categoría detectada: hardware/industrial (por palabra clave).")
+        return 'hardware_industrial'
+    return 'consumer_tech'
 
 def _get_clean_company_name(item: Dict) -> str:
     try:
@@ -94,6 +144,7 @@ class SmartShoppingBot:
         self.serpapi_key = serpapi_key
 
     def get_descriptive_query_from_image(self, image_content: bytes, errors_list: List[str]) -> Optional[str]:
+        # (Sin cambios, esta función ya es de alta calidad)
         if not genai: print("  ❌ Análisis con Gemini Vision saltado."); return None
         print("  🧠 Analizando imagen con Gemini Vision...")
         try:
@@ -111,17 +162,6 @@ class SmartShoppingBot:
             return None
         except Exception as e:
             print(f"  ❌ Fallo en análisis con Gemini Vision: {e}"); return None
-            
-    def _combine_text_and_image_query(self, text_query: str, image_query: str) -> str:
-        # Esta función es de bajo costo y alto valor, así que la mantenemos.
-        if not genai: return f"{text_query} {image_query}"
-        try:
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            prompt = f"Combine these into one effective search query. User's text: '{text_query}'. Description from image: '{image_query}'. Respond only with the final query."
-            response = model.generate_content(prompt)
-            return response.text.strip()
-        except Exception: 
-            return f"{text_query} {image_query}"
 
     def search_google_shopping(self, query: str) -> List[ProductResult]:
         print(f"--- Iniciando búsqueda en Google Shopping para: '{query}' ---")
@@ -132,7 +172,6 @@ class SmartShoppingBot:
             products = []
             shopping_results = response.json().get('shopping_results', [])
             if not isinstance(shopping_results, list): return []
-
             for item in shopping_results:
                 if isinstance(item, dict) and item.get('title') and item.get('price') and item.get('link'):
                     try:
@@ -144,69 +183,76 @@ class SmartShoppingBot:
                                 url=item['link'], image_url=item.get('thumbnail', '')
                             ))
                     except (ValueError, TypeError, KeyError): continue
-            
             print(f"✅ Google Shopping encontró {len(products)} resultados válidos.")
             return products
         except Exception as e:
             print(f"❌ Ocurrió un error en Google Shopping: {e}"); return []
 
-    def search_with_ai_verification(self, query: str, category: str) -> List[ProductResult]:
-        search_query = f'{query} supplier' if category == 'industrial_parts' else query
-        print(f"--- Iniciando búsqueda profunda ({category}): '{search_query}' ---")
-        params = {"q": search_query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "num": "15", "api_key": self.serpapi_key}
+    def search_with_ai_verification(self, query: str, category: str, errors_list: List[str]) -> List[ProductResult]:
+        print(f"--- Iniciando búsqueda profunda de calidad ({category}): '{query}' ---")
+        params = {"q": query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "num": "20", "api_key": self.serpapi_key}
         try:
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=45)
             response.raise_for_status()
             initial_results = response.json().get('organic_results', [])
-            blacklist = ['amazon.com', 'walmart.com', 'ebay.com'] if category == "industrial_parts" else []
-            filtered_results = [item for item in initial_results if isinstance(item, dict) and not any(site in item.get('link', '') for site in blacklist)] if blacklist else initial_results
+            
+            # Lista negra más agresiva para resultados de alta calidad
+            blacklist = ['amazon.com', 'walmart.com', 'ebay.com', 'pinterest.com', 'youtube.com', 'wikipedia.org']
+            if category == 'hardware_industrial':
+                print("  ℹ️  Aplicando filtro de marketplaces para búsqueda de hardware.")
+            else:
+                blacklist = ['pinterest.com', 'youtube.com', 'wikipedia.org'] # Menos restrictivo para productos de consumo
+                
+            filtered_results = [item for item in initial_results if isinstance(item, dict) and not any(site in item.get('link', '') for site in blacklist)]
             valid_results = []
             with ThreadPoolExecutor(max_workers=5) as executor:
                 future_to_item = {executor.submit(_deep_scrape_content, item.get('link')): item for item in filtered_results if item.get('link')}
                 for future in as_completed(future_to_item):
                     item = future_to_item[future]
                     content = future.result()
-                    # Sin verificación de IA, confiamos más en la presencia de un precio.
                     if content and content['price'] != "N/A":
-                        try:
-                            price_float = float(content['price'])
-                            if price_float >= 0.50:
-                                valid_results.append(ProductResult(name=content['title'], price=price_float, store=_get_clean_company_name(item), url=item.get('link'), image_url=content['image'] or item.get('thumbnail', '')))
-                        except (ValueError, TypeError): continue
+                        # ¡LÓGICA CLAVE! Solo verificamos con IA si encontramos un precio.
+                        if _verify_is_product_page(query, content['title'], content['text'], errors_list):
+                            try:
+                                price_float = float(content['price'])
+                                if price_float >= 0.50:
+                                    valid_results.append(ProductResult(name=content['title'], price=price_float, store=_get_clean_company_name(item), url=item.get('link'), image_url=content['image'] or item.get('thumbnail', '')))
+                            except (ValueError, TypeError): continue
+            print(f"✅ Búsqueda profunda encontró {len(valid_results)} resultados verificados.")
             return valid_results
         except Exception as e:
             print(f"❌ Ocurrió un error en la búsqueda profunda: {e}"); return []
 
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str], List[str]]:
         errors_list = []
-        text_query = query.strip() if query else None
-        image_query = self.get_descriptive_query_from_image(image_content, errors_list) if image_content else None
-        
         final_query = None
-        if text_query and image_query:
-            final_query = self._combine_text_and_image_query(text_query, image_query)
-        elif text_query:
-            final_query = text_query
-        elif image_query:
-            final_query = image_query
-
+        original_query = query.strip() if query else None
+        
+        if original_query:
+            final_query = _enhance_query_for_purchase(original_query, errors_list)
+        
+        if image_content:
+            image_query = self.get_descriptive_query_from_image(image_content, errors_list)
+            if image_query:
+                # Si hay texto e imagen, combina la consulta mejorada con la de la imagen.
+                final_query = f"{final_query} {image_query}" if final_query else image_query
+        
         if not final_query: 
             print("❌ No se pudo determinar una consulta válida.")
             return [], [], errors_list
         
-        # Se establece una categoría por defecto para evitar una llamada a la API
-        category = "consumer_tech"
-        print(f"🔍 Lanzando búsqueda HÍBRIDA (Modo Ahorro, Cat: {category}) para: '{final_query}'")
+        category = _get_simple_category(original_query or final_query)
+        print(f"🔍 Lanzando búsqueda HÍBRIDA (Modo Calidad, Cat: {category}) para: '{final_query}'")
         
         all_results = []
         with ThreadPoolExecutor(max_workers=2) as executor:
-            future_deep_search = executor.submit(self.search_with_ai_verification, final_query, category)
+            future_deep_search = executor.submit(self.search_with_ai_verification, final_query, category, errors_list)
             future_shopping_search = executor.submit(self.search_google_shopping, final_query)
             all_results.extend(future_deep_search.result())
             all_results.extend(future_shopping_search.result())
 
         if not all_results:
-            print("🤔 No se encontraron resultados. Las sugerencias de IA están desactivadas en modo ahorro.")
+            print("🤔 No se encontraron resultados.")
             return [], [], errors_list
 
         seen_urls = set()
@@ -277,7 +323,7 @@ AUTH_TEMPLATE_LOGIN_ONLY = """
 <html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Acceso | Smart Shopping Bot</title><link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet"><style>:root{--primary-color:#4A90E2;--secondary-color:#50E3C2;--text-color-dark:#2C3E50;--card-bg:#FFFFFF;--shadow-medium:rgba(0,0,0,0.15)}body{font-family:'Poppins',sans-serif;background:linear-gradient(135deg,var(--primary-color) 0%,var(--secondary-color) 100%);min-height:100vh;display:flex;justify-content:center;align-items:center;padding:20px}.auth-container{max-width:480px;width:100%;background:var(--card-bg);border-radius:20px;box-shadow:0 25px 50px var(--shadow-medium);overflow:hidden;animation:fadeIn .8s ease-out}@keyframes fadeIn{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}.form-header{text-align:center;padding:40px 30px 20px}.form-header h1{color:var(--text-color-dark);font-size:2em;margin-bottom:10px}.form-header p{color:#7f8c8d;font-size:1.1em}.form-body{padding:10px 40px 40px}form{display:flex;flex-direction:column;gap:20px}.input-group{display:flex;flex-direction:column;gap:8px}.input-group label{font-weight:600;color:var(--text-color-dark);font-size:.95em}.input-group input{padding:16px 20px;border:2px solid #e0e0e0;border-radius:12px;font-size:16px;transition:all .3s ease}.input-group input:focus{outline:0;border-color:var(--primary-color);box-shadow:0 0 0 4px rgba(74,144,226,.2)}.submit-btn{background:linear-gradient(45deg,var(--primary-color),#2980b9);color:#fff;border:none;padding:16px 30px;font-size:1.1em;font-weight:600;border-radius:12px;cursor:pointer;transition:all .3s ease;margin-top:15px}.submit-btn:hover{transform:translateY(-3px);box-shadow:0 12px 25px rgba(0,0,0,.2)}.flash-messages{list-style:none;padding:0 40px 20px}.flash{padding:15px;margin-bottom:15px;border-radius:8px;text-align:center}.flash.success{background-color:#d4edda;color:#155724}.flash.danger{background-color:#f8d7da;color:#721c24}.flash.warning{background-color:#fff3cd;color:#856404}</style></head><body><div class="auth-container"><div class="form-header"><h1>Bienvenido de Nuevo</h1><p>Accede para encontrar las mejores ofertas.</p></div>{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<ul class=flash-messages>{% for category, message in messages %}<li class="flash {{ category }}">{{ message }}</li>{% endfor %}</ul>{% endif %}{% endwith %}<div class="form-body"><form id="login-form" action="{{ url_for('login') }}" method="post"><div class="input-group"><label for="login-email">Correo</label><input type="email" name="email" required></div><div class="input-group"><label for="login-password">Contraseña</label><input type="password" name="password" required></div><button type="submit" class="submit-btn">Entrar</button></form></div></div></body></html>
 """
 SEARCH_TEMPLATE = """
-<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Smart Shopping Bot - Comparador de Precios</title><link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet"><style>:root{--primary-color:#4A90E2;--secondary-color:#50E3C2;--accent-color:#FF6B6B;--text-color-dark:#2C3E50;--text-color-light:#ECF0F1;--bg-light:#F8F9FA;--card-bg:#FFFFFF;--shadow-light:rgba(0,0,0,0.08);--shadow-medium:rgba(0,0,0,0.15)}body{font-family:'Poppins',sans-serif;background:var(--bg-light);min-height:100vh;padding:20px;color:var(--text-color-dark)}.container{max-width:1400px;width:100%;margin:0 auto;background:var(--card-bg);border-radius:20px;box-shadow:0 25px 50px var(--shadow-light);overflow:hidden}.header{background:linear-gradient(45deg,var(--text-color-dark),var(--primary-color));color:var(--text-color-light);padding:40px;text-align:center}.header h1{font-size:2.5em;margin-bottom:10px}.header p{font-size:1.1em;opacity:.9}.header a{color:var(--secondary-color);text-decoration:none;font-weight:600}.search-section{padding:50px;background:var(--bg-light);border-bottom:1px solid #e0e0e0}.search-form{display:flex;flex-direction:column;gap:25px;max-width:700px;margin:0 auto}.input-group{display:flex;flex-direction:column;gap:12px}.input-group label{font-weight:600;font-size:1.1em}.input-group input{padding:18px 20px;border:2px solid #e0e0e0;border-radius:12px;font-size:17px}.search-btn{background:linear-gradient(45deg,var(--primary-color),#2980b9);color:#fff;border:none;padding:18px 35px;font-size:1.2em;font-weight:600;border-radius:12px;cursor:pointer}.loading{text-align:center;padding:60px;display:none}.spinner{border:5px solid rgba(74,144,226,.2);border-top:5px solid var(--primary-color);border-radius:50%;width:60px;height:60px;animation:spin 1s linear infinite;margin:0 auto 30px}@keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}.results-section{padding:50px;display:none}.api-errors{background-color:#fff3cd;color:#856404;padding:20px;border-radius:12px;margin-bottom:30px;text-align:left;border:1px solid #ffeeba}.api-errors ul{padding-left:20px;margin:0}.products-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:30px;margin-top:40px}.product-card{background:var(--card-bg);border-radius:18px;box-shadow:0 12px 30px var(--shadow-light);overflow:hidden;border:1px solid #eee;display:flex;flex-direction:column;position:relative}.product-image{width:100%;height:220px;display:flex;align-items:center;justify-content:center;overflow:hidden}.product-image img{width:100%;height:100%;object-fit:cover}.product-info{padding:25px;display:flex;flex-direction:column;flex-grow:1;justify-content:space-between}.product-title{font-size:1.1em;font-weight:600;margin-bottom:12px;color:var(--text-color-dark)}.price-store-wrapper{display:flex;justify-content:space-between;align-items:center;margin-top:auto}.current-price{font-size:1.8em;font-weight:700;color:var(--accent-color)}.store-link a{font-weight:600;color:var(--primary-color);text-decoration:none}#suggestions{margin-top:20px;text-align:center}#suggestions h3{margin-bottom:10px}#suggestions button{background-color:#e0e0e0;border:none;padding:8px 15px;margin:5px;border-radius:8px;cursor:pointer}#image-preview-container{display:none;align-items:center;gap:20px;margin-top:20px}#image-preview{max-height:100px;border-radius:10px}#remove-image-btn{background:var(--accent-color);color:#fff;border:none;border-radius:50%;width:35px;height:35px;cursor:pointer}</style></head><body><div class="container"><header class="header"><h1>Smart Shopping Bot</h1><p>Hola, <strong>{{ user_name }}</strong>. Encuentra los mejores precios online. | <a href="{{ url_for('logout') }}">Cerrar Sesión</a></p></header><section class="search-section"><form id="search-form" class="search-form"><div class="input-group"><label for="query">¿Qué producto buscas por texto?</label><input type="text" id="query" name="query" placeholder="Ej: iPhone 15 Pro, red"></div><div class="input-group"><label for="image_file">... o mejora tu búsqueda subiendo una imagen</label><input type="file" id="image_file" name="image_file" accept="image/*"><div id="image-preview-container"><img id="image-preview" src="#" alt="Previsualización"><button type="button" id="remove-image-btn" title="Eliminar imagen">×</button></div></div><button type="submit" id="search-btn" class="search-btn">Buscar Precios</button></form></section><div id="loading" class="loading"><div class="spinner"></div><p>Buscando las mejores ofertas...</p></div><section id="results-section" class="results-section"><div id="api-errors" class="api-errors" style="display:none;"></div><h2 id="results-title">Mejores Ofertas Encontradas</h2><div id="suggestions"></div><div id="products-grid" class="products-grid"></div></section></div>
+<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Smart Shopping Bot - Comparador de Precios</title><link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet"><style>:root{--primary-color:#4A90E2;--secondary-color:#50E3C2;--accent-color:#FF6B6B;--text-color-dark:#2C3E50;--text-color-light:#ECF0F1;--bg-light:#F8F9FA;--card-bg:#FFFFFF;--shadow-light:rgba(0,0,0,0.08);--shadow-medium:rgba(0,0,0,0.15)}body{font-family:'Poppins',sans-serif;background:var(--bg-light);min-height:100vh;padding:20px;color:var(--text-color-dark)}.container{max-width:1400px;width:100%;margin:0 auto;background:var(--card-bg);border-radius:20px;box-shadow:0 25px 50px var(--shadow-light);overflow:hidden}.header{background:linear-gradient(45deg,var(--text-color-dark),var(--primary-color));color:var(--text-color-light);padding:40px;text-align:center}.header h1{font-size:2.5em;margin-bottom:10px}.header p{font-size:1.1em;opacity:.9}.header a{color:var(--secondary-color);text-decoration:none;font-weight:600}.search-section{padding:50px;background:var(--bg-light);border-bottom:1px solid #e0e0e0}.search-form{display:flex;flex-direction:column;gap:25px;max-width:700px;margin:0 auto}.input-group{display:flex;flex-direction:column;gap:12px}.input-group label{font-weight:600;font-size:1.1em}.input-group input{padding:18px 20px;border:2px solid #e0e0e0;border-radius:12px;font-size:17px}.search-btn{background:linear-gradient(45deg,var(--primary-color),#2980b9);color:#fff;border:none;padding:18px 35px;font-size:1.2em;font-weight:600;border-radius:12px;cursor:pointer}.loading{text-align:center;padding:60px;display:none}.spinner{border:5px solid rgba(74,144,226,.2);border-top:5px solid var(--primary-color);border-radius:50%;width:60px;height:60px;animation:spin 1s linear infinite;margin:0 auto 30px}@keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}.results-section{padding:50px;display:none}.api-errors{background-color:#fff3cd;color:#856404;padding:20px;border-radius:12px;margin-bottom:30px;text-align:left;border:1px solid #ffeeba}.api-errors ul{padding-left:20px;margin:0}.products-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:30px;margin-top:40px}.product-card{background:var(--card-bg);border-radius:18px;box-shadow:0 12px 30px var(--shadow-light);overflow:hidden;border:1px solid #eee;display:flex;flex-direction:column;position:relative}.product-image{width:100%;height:220px;display:flex;align-items:center;justify-content:center;overflow:hidden}.product-image img{width:100%;height:100%;object-fit:cover}.product-info{padding:25px;display:flex;flex-direction:column;flex-grow:1;justify-content:space-between}.product-title{font-size:1.1em;font-weight:600;margin-bottom:12px;color:var(--text-color-dark)}.price-store-wrapper{display:flex;justify-content:space-between;align-items:center;margin-top:auto}.current-price{font-size:1.8em;font-weight:700;color:var(--accent-color)}.store-link a{font-weight:600;color:var(--primary-color);text-decoration:none}#suggestions{margin-top:20px;text-align:center}#suggestions h3{margin-bottom:10px}#suggestions button{background-color:#e0e0e0;border:none;padding:8px 15px;margin:5px;border-radius:8px;cursor:pointer}#image-preview-container{display:none;align-items:center;gap:20px;margin-top:20px}#image-preview{max-height:100px;border-radius:10px}#remove-image-btn{background:var(--accent-color);color:#fff;border:none;border-radius:50%;width:35px;height:35px;cursor:pointer}</style></head><body><div class="container"><header class="header"><h1>Smart Shopping Bot</h1><p>Hola, <strong>{{ user_name }}</strong>. Encuentra los mejores precios online. | <a href="{{ url_for('logout') }}">Cerrar Sesión</a></p></header><section class="search-section"><form id="search-form" class="search-form"><div class="input-group"><label for="query">¿Qué producto buscas por texto?</label><input type="text" id="query" name="query" placeholder="Ej: cinta de pintor azul 2 pulgadas"></div><div class="input-group"><label for="image_file">... o mejora tu búsqueda subiendo una imagen</label><input type="file" id="image_file" name="image_file" accept="image/*"><div id="image-preview-container"><img id="image-preview" src="#" alt="Previsualización"><button type="button" id="remove-image-btn" title="Eliminar imagen">×</button></div></div><button type="submit" id="search-btn" class="search-btn">Buscar Precios</button></form></section><div id="loading" class="loading"><div class="spinner"></div><p>Realizando búsqueda de alta calidad...</p></div><section id="results-section" class="results-section"><div id="api-errors" class="api-errors" style="display:none;"></div><h2 id="results-title">Mejores Ofertas Encontradas</h2><div id="suggestions"></div><div id="products-grid" class="products-grid"></div></section></div>
 <script>
 const searchForm = document.getElementById("search-form"), queryInput = document.getElementById("query"), imageInput = document.getElementById("image_file"), loadingDiv = document.getElementById("loading"), resultsSection = document.getElementById("results-section"), productsGrid = document.getElementById("products-grid"), suggestionsDiv = document.getElementById("suggestions"), apiErrorsDiv = document.getElementById("api-errors");
 function performSearch() {
@@ -295,13 +341,14 @@ function performSearch() {
         if (data.errors && data.errors.length > 0) {
             let errorHTML = '<strong>Advertencias de la Búsqueda:</strong><ul>';
             data.errors.forEach(error => { errorHTML += `<li>${error}</li>`; });
-            errorHTML += '</ul>';
+            errorHTML += '</ul><p>Nota: Los errores de cuota pueden reducir la calidad de los resultados. Considera actualizar tu plan de API de Google.</p>';
             apiErrorsDiv.innerHTML = errorHTML;
             apiErrorsDiv.style.display = "block";
         }
 
         if (data.results && data.results.length > 0) {
             document.getElementById("results-title").style.display = "block";
+            productsGrid.innerHTML = ""; // Limpiar antes de añadir
             data.results.forEach(product => {
                 productsGrid.innerHTML += `
                     <div class="product-card">
@@ -314,19 +361,6 @@ function performSearch() {
                             </div>
                         </div>
                     </div>`;
-            });
-        } else if (data.suggestions && data.suggestions.length > 0) {
-            document.getElementById("results-title").style.display = "none";
-            let suggestionsHTML = '<h3>No encontramos resultados. ¿Quizás quisiste decir...?</h3>';
-            data.suggestions.forEach(suggestion => { suggestionsHTML += `<button class="suggestion-btn">${suggestion}</button>`; });
-            suggestionsDiv.innerHTML = suggestionsHTML;
-            document.querySelectorAll('.suggestion-btn').forEach(button => {
-                button.addEventListener('click', () => {
-                    queryInput.value = button.textContent;
-                    imageInput.value = "";
-                    document.getElementById("image-preview-container").style.display = "none";
-                    performSearch();
-                });
             });
         } else {
             document.getElementById("results-title").style.display = "none";
