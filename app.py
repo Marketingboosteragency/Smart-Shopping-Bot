@@ -1,12 +1,13 @@
-# app.py (versión 15.4 - Front-End Corregido)
+# app.py (versión 16.0 - Motor de Búsqueda Exhaustiva)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 15.4 (Front-End Fix & Final Polish)
+# Versión: 16.0 (Exhaustive Search Engine)
 # Novedades:
-# - CORRECCIÓN CRÍTICA: Se ha reparado el JavaScript del front-end que impedía que el botón de búsqueda funcionara.
-# - PLANTILLAS ROBUSTAS: Se han restaurado las plantillas HTML a un formato legible y sintácticamente correcto para prevenir errores de despliegue.
-# - MANTIENE EL MOTOR DE AUTORIDAD DE PRECIOS: La lógica de IA para la extracción precisa de precios y divisas sigue siendo el núcleo del bot.
+# - BÚSQUEDA DIRIGIDA A TIENDAS: Se añade una lista de tiendas de alta prioridad para realizar búsquedas específicas dentro de sus sitios (ej. `site:homedepot.com`).
+# - BÚSQUEDA ORGÁNICA PROFUNDA: La recolección ahora analiza las primeras 2 páginas de resultados de Google, duplicando la profundidad de la búsqueda.
+# - CONSULTA DE "ÚLTIMO RECURSO": Se añade una consulta genérica para capturar resultados que las búsquedas comerciales más específicas podrían omitir.
+# - ARQUITECTURA ROBUSTA: Se mantiene el motor de autoridad de precios y la estructura de archivo único a prueba de errores.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -94,7 +95,7 @@ def _get_price_and_relevance_from_ai(candidate: Dict[str, Any], original_query: 
     if not genai or not candidate.get('text_content'): return default_failure
     print(f"  🤖⚖️ Sometiendo a juicio de IA: '{candidate['title']}'...")
     prompt = (
-        f"You are a precise data extraction AI for e-commerce. Analyze the following data and return a JSON object.\n\n"
+        f"You are a precise data extraction AI. Analyze the following data and return a JSON object.\n\n"
         f"DATA:\n- User's Search: '{original_query}'\n- Page Title: '{candidate['title']}'\n- Page Text Snippet: '{candidate['text_content']}'\n\n"
         f"TASKS:\n1. **Extract Price & Currency:** Find the main product's price. Identify its 3-letter currency code (e.g., 'USD', 'MXN', 'DOP'). Assume 'USD' if unclear.\n"
         f"2. **Check Relevance:** Is the product a direct, relevant answer to the user's search?\n\n"
@@ -116,22 +117,56 @@ def _get_price_and_relevance_from_ai(candidate: Dict[str, Any], original_query: 
 
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
-        self.serpapi_key = serpapi_key; self.CONFIDENCE_THRESHOLD = 0.75
+        self.serpapi_key = serpapi_key
+        self.CONFIDENCE_THRESHOLD = 0.75
+        self.HIGH_PRIORITY_STORES = [
+            "homedepot.com", "lowes.com", "grainger.com", "uline.com", 
+            "mcmaster.com", "harborfreight.com", "lumberliquidators.com"
+        ]
 
-    def _get_candidate_urls(self, query: str) -> List[str]:
-        print(f"--- Recolectando URLs para: '{query}' ---")
-        urls = set()
-        for engine in ["google", "google_shopping"]:
-            params = {"q": query, "engine": engine, "location": "United States", "gl": "us", "hl": "en", "api_key": self.serpapi_key}
-            if engine == "google": params["num"] = "15"
-            try:
-                response = requests.get("https://serpapi.com/search.json", params=params, timeout=45)
-                response.raise_for_status()
-                results = response.json().get('organic_results', []) if engine == "google" else response.json().get('shopping_results', [])
-                for item in results:
-                    if isinstance(item, dict) and item.get('link'): urls.add(item['link'])
-            except Exception as e: print(f"❌ Error en recolección ({engine}): {e}")
-        return list(urls)
+    def _run_search_task(self, query: str, engine: str, start: int = 0) -> List[str]:
+        """Ejecuta una única tarea de búsqueda y devuelve una lista de URLs."""
+        urls = []
+        params = {"q": query, "engine": engine, "location": "United States", "gl": "us", "hl": "en", "api_key": self.serpapi_key, "start": start}
+        if engine == "google": params["num"] = "10" # 10 resultados por página
+        try:
+            response = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
+            response.raise_for_status()
+            results = response.json().get('organic_results', []) if engine == "google" else response.json().get('shopping_results', [])
+            for item in results:
+                if isinstance(item, dict) and item.get('link'): urls.append(item['link'])
+        except Exception as e:
+            print(f"❌ Error en sub-búsqueda ({engine}, q={query[:30]}...): {e}")
+        return urls
+
+    def get_candidate_urls_exhaustively(self, base_query: str, original_query: str) -> List[str]:
+        print("--- FASE 1: Iniciando Búsqueda Exhaustiva de Candidatos ---")
+        tasks = []
+        
+        # 1. Búsqueda Orgánica Profunda (2 páginas)
+        for i in range(2): # 0 para la primera página, 10 para la segunda
+            tasks.append({"query": base_query, "engine": "google", "start": i * 10})
+        
+        # 2. Búsqueda en Google Shopping
+        tasks.append({"query": base_query, "engine": "google_shopping", "start": 0})
+        
+        # 3. Búsqueda Dirigida a Tiendas de Alta Prioridad
+        for store in self.HIGH_PRIORITY_STORES:
+            tasks.append({"query": f'site:{store} "{original_query}"', "engine": "google", "start": 0})
+            
+        # 4. Consulta de "Último Recurso"
+        tasks.append({"query": f'"{original_query}"', "engine": "google", "start": 0})
+
+        print(f"  🔥 Ejecutando {len(tasks)} tareas de búsqueda en paralelo...")
+        all_urls = set()
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_task = {executor.submit(self._run_search_task, **task): task for task in tasks}
+            for future in as_completed(future_to_task):
+                urls_from_task = future.result()
+                for url in urls_from_task:
+                    all_urls.add(url)
+        
+        return list(all_urls)
 
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str], List[str]]:
         errors_list = []
@@ -141,15 +176,15 @@ class SmartShoppingBot:
         enhanced_query = _enhance_query_for_purchase(original_query, errors_list)
         if not enhanced_query: return [], ["No se pudo generar una consulta válida."], errors_list
         
-        candidate_urls = self._get_candidate_urls(enhanced_query)
+        candidate_urls = self.get_candidate_urls_exhaustively(enhanced_query, original_query)
         blacklist = ['pinterest.com', 'youtube.com', 'wikipedia.org', 'facebook.com', 'twitter.com', 'yelp.com']
         filtered_urls = [url for url in candidate_urls if not any(site in url for site in blacklist)]
         
-        print(f"--- {len(filtered_urls)} URLs candidatas pasarán a la fase de scrape y juicio. ---")
+        print(f"--- {len(filtered_urls)} URLs candidatas únicas pasarán a la fase de scrape y juicio. ---")
         if not filtered_urls: return [], [], errors_list
 
         validated_products = []
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             scraped_candidates = [r for r in executor.map(_deep_scrape_content, filtered_urls)]
             candidates_for_judgement = [c for c in scraped_candidates if c['text_content']]
             print(f"--- FASE 2: Sometiendo a juicio de IA a {len(candidates_for_judgement)} candidatos. ---")
@@ -228,51 +263,73 @@ AUTH_TEMPLATE_LOGIN_ONLY = """
 """
 
 SEARCH_TEMPLATE = """
-<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Smart Shopping Bot - Comparador de Precios</title><link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet"><style>:root{--primary-color:#4A90E2;--secondary-color:#50E3C2;--accent-color:#FF6B6B;--text-color-dark:#2C3E50;--text-color-light:#ECF0F1;--bg-light:#F8F9FA;--card-bg:#FFFFFF;--shadow-light:rgba(0,0,0,0.08);--shadow-medium:rgba(0,0,0,0.15)}body{font-family:'Poppins',sans-serif;background:var(--bg-light);min-height:100vh;padding:20px;color:var(--text-color-dark)}.container{max-width:1400px;width:100%;margin:0 auto;background:var(--card-bg);border-radius:20px;box-shadow:0 25px 50px var(--shadow-light);overflow:hidden}.header{background:linear-gradient(45deg,var(--text-color-dark),var(--primary-color));color:var(--text-color-light);padding:40px;text-align:center}.header h1{font-size:2.5em;margin-bottom:10px}.header p{font-size:1.1em;opacity:.9}.header a{color:var(--secondary-color);text-decoration:none;font-weight:600}.search-section{padding:50px;background:var(--bg-light);border-bottom:1px solid #e0e0e0}.search-form{display:flex;flex-direction:column;gap:25px;max-width:700px;margin:0 auto}.input-group{display:flex;flex-direction:column;gap:12px}.input-group label{font-weight:600;font-size:1.1em}.input-group input{padding:18px 20px;border:2px solid #e0e0e0;border-radius:12px;font-size:17px}.search-btn{background:linear-gradient(45deg,var(--primary-color),#2980b9);color:#fff;border:none;padding:18px 35px;font-size:1.2em;font-weight:600;border-radius:12px;cursor:pointer}.loading{text-align:center;padding:60px;display:none}.loading p{font-weight:600;color:var(--primary-color)}.spinner{border:5px solid rgba(74,144,226,.2);border-top:5px solid var(--primary-color);border-radius:50%;width:60px;height:60px;animation:spin 1s linear infinite;margin:0 auto 30px}@keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}.results-section{padding:50px;display:none}.api-errors{background-color:#fff3cd;color:#856404;padding:20px;border-radius:12px;margin-bottom:30px;text-align:left;border:1px solid #ffeeba}.api-errors ul{padding-left:20px;margin:0}.products-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:30px;margin-top:40px}.product-card{background:var(--card-bg);border-radius:18px;box-shadow:0 12px 30px var(--shadow-light);overflow:hidden;border:1px solid #eee;display:flex;flex-direction:column;position:relative}.product-image{width:100%;height:220px;display:flex;align-items:center;justify-content:center;overflow:hidden}.product-image img{width:100%;height:100%;object-fit:cover}.product-info{padding:25px;display:flex;flex-direction:column;flex-grow:1;justify-content:space-between}.product-title{font-size:1.1em;font-weight:600;margin-bottom:12px;color:var(--text-color-dark)}.price-store-wrapper{display:flex;justify-content:space-between;align-items:center;margin-top:auto}.current-price{font-size:1.8em;font-weight:700;color:var(--accent-color)}.store-link a{font-weight:600;color:var(--primary-color);text-decoration:none}#image-preview-container{display:none;align-items:center;gap:20px;margin-top:20px}#image-preview{max-height:100px;border-radius:10px}#remove-image-btn{background:var(--accent-color);color:#fff;border:none;border-radius:50%;width:35px;height:35px;cursor:pointer}</style></head><body><div class="container"><header class="header"><h1>Smart Shopping Bot</h1><p>Hola, <strong>{{ user_name }}</strong>. Encuentra los mejores precios online. | <a href="{{ url_for('logout') }}">Cerrar Sesión</a></p></header><section class="search-section"><form id="search-form" class="search-form"><div class="input-group"><label for="query">¿Qué producto buscas?</label><input type="text" id="query" name="query" placeholder="Ej: cinta de pintor azul 2 pulgadas"></div><div class="input-group"><label for="image_file">... o sube una imagen para una búsqueda más precisa</label><input type="file" id="image_file" name="image_file" accept="image/*"><div id="image-preview-container"><img id="image-preview" src="#" alt="Previsualización"><button type="button" id="remove-image-btn" title="Eliminar imagen">×</button></div></div><button type="submit" id="search-btn" class="search-btn">Buscar Precios</button></form></section><div id="loading" class="loading"><div class="spinner"></div><p>Ejecutando motor de autoridad de precios...</p></div><section id="results-section" class="results-section"><div id="api-errors" class="api-errors" style="display:none;"></div><h2 id="results-title">Resultados de Alta Precisión Verificados por IA</h2><div id="products-grid" class="products-grid"></div></section></div>
+<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Smart Shopping Bot - Comparador de Precios</title><link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet"><style>:root{--primary-color:#4A90E2;--secondary-color:#50E3C2;--accent-color:#FF6B6B;--text-color-dark:#2C3E50;--text-color-light:#ECF0F1;--bg-light:#F8F9FA;--card-bg:#FFFFFF;--shadow-light:rgba(0,0,0,0.08);--shadow-medium:rgba(0,0,0,0.15)}body{font-family:'Poppins',sans-serif;background:var(--bg-light);min-height:100vh;padding:20px;color:var(--text-color-dark)}.container{max-width:1400px;width:100%;margin:0 auto;background:var(--card-bg);border-radius:20px;box-shadow:0 25px 50px var(--shadow-light);overflow:hidden}.header{background:linear-gradient(45deg,var(--text-color-dark),var(--primary-color));color:var(--text-color-light);padding:40px;text-align:center}.header h1{font-size:2.5em;margin-bottom:10px}.header p{font-size:1.1em;opacity:.9}.header a{color:var(--secondary-color);text-decoration:none;font-weight:600}.search-section{padding:50px;background:var(--bg-light);border-bottom:1px solid #e0e0e0}.search-form{display:flex;flex-direction:column;gap:25px;max-width:700px;margin:0 auto}.input-group{display:flex;flex-direction:column;gap:12px}.input-group label{font-weight:600;font-size:1.1em}.input-group input{padding:18px 20px;border:2px solid #e0e0e0;border-radius:12px;font-size:17px}.search-btn{background:linear-gradient(45deg,var(--primary-color),#2980b9);color:#fff;border:none;padding:18px 35px;font-size:1.2em;font-weight:600;border-radius:12px;cursor:pointer}.loading{text-align:center;padding:60px;display:none}.loading p{font-weight:600;color:var(--primary-color)}.spinner{border:5px solid rgba(74,144,226,.2);border-top:5px solid var(--primary-color);border-radius:50%;width:60px;height:60px;animation:spin 1s linear infinite;margin:0 auto 30px}@keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}.results-section{padding:50px;display:none}.api-errors{background-color:#fff3cd;color:#856404;padding:20px;border-radius:12px;margin-bottom:30px;text-align:left;border:1px solid #ffeeba}.api-errors ul{padding-left:20px;margin:0}.products-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:30px;margin-top:40px}.product-card{background:var(--card-bg);border-radius:18px;box-shadow:0 12px 30px var(--shadow-light);overflow:hidden;border:1px solid #eee;display:flex;flex-direction:column;position:relative}.product-image{width:100%;height:220px;display:flex;align-items:center;justify-content:center;overflow:hidden}.product-image img{width:100%;height:100%;object-fit:cover}.product-info{padding:25px;display:flex;flex-direction:column;flex-grow:1;justify-content:space-between}.product-title{font-size:1.1em;font-weight:600;margin-bottom:12px;color:var(--text-color-dark)}.price-store-wrapper{display:flex;justify-content:space-between;align-items:center;margin-top:auto}.current-price{font-size:1.8em;font-weight:700;color:var(--accent-color)}.store-link a{font-weight:600;color:var(--primary-color);text-decoration:none}#image-preview-container{display:none;align-items:center;gap:20px;margin-top:20px}#image-preview{max-height:100px;border-radius:10px}#remove-image-btn{background:var(--accent-color);color:#fff;border:none;border-radius:50%;width:35px;height:35px;cursor:pointer}</style></head><body><div class="container"><header class="header"><h1>Smart Shopping Bot</h1><p>Hola, <strong>{{ user_name }}</strong>. Encuentra los mejores precios online. | <a href="{{ url_for('logout') }}">Cerrar Sesión</a></p></header><section class="search-section"><form id="search-form" class="search-form"><div class="input-group"><label for="query">¿Qué producto buscas?</label><input type="text" id="query" name="query" placeholder="Ej: cinta de pintor azul 2 pulgadas"></div><div class="input-group"><label for="image_file">... o sube una imagen para una búsqueda más precisa</label><input type="file" id="image_file" name="image_file" accept="image/*"><div id="image-preview-container"><img id="image-preview" src="#" alt="Previsualización"><button type="button" id="remove-image-btn" title="Eliminar imagen">×</button></div></div><button type="submit" id="search-btn" class="search-btn">Buscar Precios</button></form></section><div id="loading" class="loading"><div class="spinner"></div><p>Ejecutando motor de búsqueda exhaustiva...</p></div><section id="results-section" class="results-section"><div id="api-errors" class="api-errors" style="display:none;"></div><h2 id="results-title">Resultados de Alta Precisión Verificados por IA</h2><div id="products-grid" class="products-grid"></div></section></div>
 <script>
-const searchForm = document.getElementById("search-form"), queryInput = document.getElementById("query"), imageInput = document.getElementById("image_file"), loadingDiv = document.getElementById("loading"), resultsSection = document.getElementById("results-section"), productsGrid = document.getElementById("products-grid"), apiErrorsDiv = document.getElementById("api-errors");
-function performSearch() {
-    const formData = new FormData(searchForm);
-    loadingDiv.style.display = "block"; resultsSection.style.display = "none"; productsGrid.innerHTML = ""; apiErrorsDiv.innerHTML = ""; apiErrorsDiv.style.display = "none";
-    fetch("{{ url_for('api_search') }}", { method: "POST", body: formData }).then(response => response.json()).then(data => {
-        loadingDiv.style.display = "none";
-        if (data.errors && data.errors.length > 0) {
-            let errorHTML = '<strong>Advertencias durante la búsqueda:</strong><ul>';
-            data.errors.forEach(error => { errorHTML += `<li>${error}</li>`; });
-            errorHTML += '</ul>'; apiErrorsDiv.innerHTML = errorHTML; apiErrorsDiv.style.display = "block";
-        }
-        if (data.results && data.results.length > 0) {
-            document.getElementById("results-title").style.display = "block";
-            data.results.forEach(product => {
-                const reasoning = product.relevance_reasoning.replace(/"/g, '"');
-                const confidence = product.confidence_score.toFixed(2);
-                const originalPrice = `${product.original_price.toFixed(2)} ${product.original_currency}`;
-                productsGrid.innerHTML += `
-                    <div class="product-card">
-                        <div class="product-image"><img src="${product.image_url || 'https://via.placeholder.com/300'}" alt="${product.name}" onerror="this.onerror=null;this.src='https://via.placeholder.com/300';"></div>
-                        <div class="product-info">
-                            <div class="product-title" title="IA Reasoning: ${reasoning}\nConfidence: ${confidence}">${product.name}</div>
-                            <div class="price-store-wrapper">
-                                <div class="current-price" title="Original: ${originalPrice}">$${product.price_in_usd.toFixed(2)}</div>
-                                <div class="store-link"><a href="${product.url}" target="_blank">Ver en ${product.store}</a></div>
+    const searchForm = document.getElementById("search-form");
+    const queryInput = document.getElementById("query");
+    const imageInput = document.getElementById("image_file");
+    const loadingDiv = document.getElementById("loading");
+    const resultsSection = document.getElementById("results-section");
+    const productsGrid = document.getElementById("products-grid");
+    const apiErrorsDiv = document.getElementById("api-errors");
+
+    function performSearch() {
+        const formData = new FormData(searchForm);
+        loadingDiv.style.display = "block";
+        resultsSection.style.display = "none";
+        productsGrid.innerHTML = "";
+        apiErrorsDiv.innerHTML = "";
+        apiErrorsDiv.style.display = "none";
+
+        fetch("{{ url_for('api_search') }}", {
+            method: "POST",
+            body: formData
+        }).then(response => response.json()).then(data => {
+            loadingDiv.style.display = "none";
+
+            if (data.errors && data.errors.length > 0) {
+                let errorHTML = '<strong>Advertencias durante la búsqueda:</strong><ul>';
+                data.errors.forEach(error => { errorHTML += `<li>${error}</li>`; });
+                errorHTML += '</ul>';
+                apiErrorsDiv.innerHTML = errorHTML;
+                apiErrorsDiv.style.display = "block";
+            }
+
+            if (data.results && data.results.length > 0) {
+                document.getElementById("results-title").style.display = "block";
+                data.results.forEach(product => {
+                    const reasoning = product.relevance_reasoning.replace(/"/g, '"');
+                    const confidence = product.confidence_score.toFixed(2);
+                    const originalPrice = `${product.original_price.toFixed(2)} ${product.original_currency}`;
+                    productsGrid.innerHTML += `
+                        <div class="product-card">
+                            <div class="product-image"><img src="${product.image_url || 'https://via.placeholder.com/300'}" alt="${product.name}" onerror="this.onerror=null;this.src='https://via.placeholder.com/300';"></div>
+                            <div class="product-info">
+                                <div class="product-title" title="IA Reasoning: ${reasoning}\nConfidence: ${confidence}">${product.name}</div>
+                                <div class="price-store-wrapper">
+                                    <div class="current-price" title="Original: ${originalPrice}">$${product.price_in_usd.toFixed(2)}</div>
+                                    <div class="store-link"><a href="${product.url}" target="_blank">Ver en ${product.store}</a></div>
+                                </div>
                             </div>
-                        </div>
-                    </div>`;
-            });
-        } else {
-            document.getElementById("results-title").style.display = "none";
-            if (!apiErrorsDiv.innerHTML) { productsGrid.innerHTML = "<p>No se encontraron resultados de alta precisión para tu búsqueda.</p>"; }
-        }
-        resultsSection.style.display = "block";
-    }).catch(error => {
-        console.error("Error:", error); loadingDiv.style.display = "none";
-        productsGrid.innerHTML = "<p>Ocurrió un error crítico durante la búsqueda. Por favor, revisa los logs del servidor.</p>";
-        resultsSection.style.display = "block";
-    });
-}
-searchForm.addEventListener("submit", function(e) { e.preventDefault(), performSearch(); });
-imageInput.addEventListener("change", function() { if (this.files && this.files[0]) { var reader = new FileReader(); reader.onload = function(e) { document.getElementById("image-preview").src = e.target.result; document.getElementById("image-preview-container").style.display = "flex"; }; reader.readAsDataURL(this.files[0]); } });
-document.getElementById("remove-image-btn").addEventListener("click", function() { imageInput.value = ""; document.getElementById("image-preview").src = "#"; document.getElementById("image-preview-container").style.display = "none"; });
+                        </div>`;
+                });
+            } else {
+                document.getElementById("results-title").style.display = "none";
+                if (!apiErrorsDiv.innerHTML) {
+                    productsGrid.innerHTML = "<p>No se encontraron resultados de alta precisión para tu búsqueda.</p>";
+                }
+            }
+            resultsSection.style.display = "block";
+        }).catch(error => {
+            console.error("Error:", error);
+            loadingDiv.style.display = "none";
+            productsGrid.innerHTML = "<p>Ocurrió un error crítico durante la búsqueda. Por favor, revisa los logs del servidor.</p>";
+            resultsSection.style.display = "block";
+        });
+    }
+    searchForm.addEventListener("submit", function(e) { e.preventDefault(); performSearch(); });
+    imageInput.addEventListener("change", function() { if (this.files && this.files[0]) { var reader = new FileReader(); reader.onload = function(e) { document.getElementById("image-preview").src = e.target.result; document.getElementById("image-preview-container").style.display = "flex"; }; reader.readAsDataURL(this.files[0]); } });
+    document.getElementById("remove-image-btn").addEventListener("click", function() { imageInput.value = ""; document.getElementById("image-preview").src = "#"; document.getElementById("image-preview-container").style.display = "none"; });
 </script>
 </body></html>
 """
