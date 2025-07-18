@@ -1,12 +1,12 @@
-# app.py (versión 14.3 - Manejo de Errores de API y Robustez)
+# app.py (versión 14.4 - Sin Traducción Automática)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 14.3 (API Error Handling & Robustness)
+# Versión: 14.4 (Translation Removed)
 # Novedades:
-# - El bot ahora detecta errores de cuota de la API de Gemini y notifica al usuario en la interfaz.
-# - CORREGIDO: Se ha hecho más robusta la función de búsqueda en Google Shopping para evitar fallos si faltan datos en los resultados de la API.
-# - Mantiene el filtro de precios y la traducción interna.
+# - Se ha eliminado la función de traducción automática para simplificar el flujo y evitar errores de cuota de la API de Gemini.
+# - La búsqueda por texto ahora se realiza en el idioma original del usuario.
+# - Se mantiene el motor híbrido, el análisis de imágenes, el filtro de precios y el manejo de errores.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -98,24 +98,6 @@ def _get_product_category(query: str, errors_list: List[str]) -> str:
         return "consumer_tech"
     except Exception:
         return "consumer_tech"
-
-def _translate_to_english(text: str, errors_list: List[str]) -> str:
-    if not genai or not text: return text
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = f"Translate the following text to English. Respond ONLY with the translated text, without any introductory phrases or quotation marks.\n\nText: '{text}'"
-        response = model.generate_content(prompt)
-        translated_text = response.text.strip()
-        print(f"  🌐 Consulta traducida de '{text}' a '{translated_text}'.")
-        return translated_text
-    except google_exceptions.ResourceExhausted as e:
-        error_msg = "Advertencia: Se ha superado la cuota de la API de IA para la traducción. Realizando búsqueda con el texto original."
-        print(f"  ❌ {error_msg}")
-        if error_msg not in errors_list: errors_list.append(error_msg)
-        return text
-    except Exception as e:
-        print(f"  ❌ Error durante la traducción: {e}. Se usará la consulta original.")
-        return text
 
 def _verify_is_product_page(query: str, page_title: str, page_content: str, category: str) -> bool:
     if not genai: return True
@@ -254,14 +236,15 @@ class SmartShoppingBot:
         errors_list = []
         text_query = query.strip() if query else None
         
-        translated_text_query = _translate_to_english(text_query, errors_list) if text_query else None
+        # El análisis de imagen todavía genera una consulta en inglés, lo cual es beneficioso.
         image_query = self.get_descriptive_query_from_image(image_content, errors_list) if image_content else None
         
         final_query = None
-        if translated_text_query and image_query:
-            final_query = self._combine_text_and_image_query(translated_text_query, image_query)
-        elif translated_text_query:
-            final_query = translated_text_query
+        if text_query and image_query:
+            # Gemini combinará el texto del usuario (en cualquier idioma) con la descripción de la imagen (en inglés).
+            final_query = self._combine_text_and_image_query(text_query, image_query)
+        elif text_query:
+            final_query = text_query
         elif image_query:
             final_query = image_query
 
@@ -270,7 +253,7 @@ class SmartShoppingBot:
             return [], [], errors_list
         
         category = _get_product_category(final_query, errors_list)
-        print(f"🔍 Lanzando búsqueda HÍBRIDA ({category}) para la consulta final en inglés: '{final_query}'")
+        print(f"🔍 Lanzando búsqueda HÍBRIDA ({category}) para la consulta: '{final_query}'")
         
         all_results = []
         with ThreadPoolExecutor(max_workers=2) as executor:
