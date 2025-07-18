@@ -1,13 +1,13 @@
-# app.py (versión 15.0 - Motor de Autoridad de Precios)
+# app.py (versión 15.2 - Motor de Autoridad de Precios - Single File)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 15.0 (Price Authority Engine)
+# Versión: 15.2 (Price Authority Engine - Single File Architecture)
 # Novedades:
-# - ARQUITECTURA DE PRECIOS RENOVADA: La IA ahora es la única responsable de extraer el precio y la divisa desde el texto de la página, eliminando los errores del scraper.
-# - SISTEMA DE CONVERSIÓN DE DIVISAS: Se ha integrado un sistema para normalizar todos los precios a USD, permitiendo comparaciones justas y precisas (ej. DOP, MXN a USD).
-# - TRANSPARENCIA TOTAL: La interfaz ahora muestra el precio en USD y, en un tooltip, el precio y la divisa originales.
-# - FLUJO DE CONFIANZA CERO: El sistema no asume nada; cada candidato es juzgado desde cero por la IA para garantizar la máxima precisión de los datos.
+# - ARQUITECTURA DE ARCHIVO ÚNICO: Todo el código, incluyendo el HTML, está contenido en este único archivo para un despliegue simple, corrigiendo el `SyntaxError` anterior.
+# - MANTIENE EL MOTOR DE AUTORIDAD DE PRECIOS: La IA sigue siendo la única responsable de extraer precios y divisas para máxima precisión.
+# - MANTIENE LA CONVERSIÓN DE DIVISAS: Todos los precios se normalizan a USD para una comparación justa.
+# - MANTIENE LA VALIDACIÓN HOLÍSTICA: La IA juzga la relevancia y la confianza de cada resultado.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -90,6 +90,21 @@ def _deep_scrape_content(url: str) -> Dict[str, Any]:
     except Exception:
         return {'title': 'N/A', 'image': '', 'text_content': '', 'url': url}
 
+def _enhance_query_for_purchase(text: str, errors_list: List[str]) -> str:
+    if not genai or not text: return text
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        prompt = f"A user wants to buy a product. Enhance and translate their search query into a specific, detailed English query suitable for finding the product for sale online. Include relevant keywords like size, type, or 'for sale'. User query: '{text}'. Respond ONLY with the enhanced English query."
+        response = model.generate_content(prompt)
+        enhanced_query = response.text.strip()
+        print(f"  🧠 Consulta mejorada por IA: de '{text}' a '{enhanced_query}'.")
+        return enhanced_query
+    except google_exceptions.ResourceExhausted as e:
+        error_msg = "Advertencia: Cuota de API superada para mejorar la consulta. Usando texto original."
+        if error_msg not in errors_list: errors_list.append(error_msg)
+        return text
+    except Exception: return text
+
 def _get_price_and_relevance_from_ai(candidate: Dict[str, Any], original_query: str, errors_list: List[str]) -> Dict[str, Any]:
     """La IA actúa como la autoridad final para extraer precio, moneda y relevancia."""
     default_failure = {"is_highly_relevant": False, "confidence_score": 0.0}
@@ -141,7 +156,6 @@ class SmartShoppingBot:
     def _get_candidate_urls(self, query: str) -> List[str]:
         print(f"--- Recolectando URLs para: '{query}' ---")
         urls = set()
-        # Búsqueda orgánica y de shopping para máxima cobertura
         for engine in ["google", "google_shopping"]:
             params = {"q": query, "engine": engine, "location": "United States", "gl": "us", "hl": "en", "api_key": self.serpapi_key}
             if engine == "google": params["num"] = "15"
@@ -165,7 +179,6 @@ class SmartShoppingBot:
         enhanced_query = _enhance_query_for_purchase(original_query, errors_list)
         if not enhanced_query: return [], ["No se pudo generar una consulta válida."], errors_list
         
-        # --- FASE 1: RECOLECCIÓN MASIVA DE URLs ---
         print(f"--- FASE 1: Recolectando candidatos para '{enhanced_query}' ---")
         candidate_urls = self._get_candidate_urls(enhanced_query)
         blacklist = ['pinterest.com', 'youtube.com', 'wikipedia.org', 'facebook.com', 'twitter.com', 'yelp.com']
@@ -174,14 +187,11 @@ class SmartShoppingBot:
         print(f"--- {len(filtered_urls)} URLs candidatas pasarán a la fase de scrape y juicio. ---")
         if not filtered_urls: return [], [], errors_list
 
-        # --- FASE 2: SCRAPE Y JUICIO DE IA ---
         validated_products = []
         with ThreadPoolExecutor(max_workers=8) as executor:
-            # Primero, scrapeamos todo en paralelo
             future_to_url = {executor.submit(_deep_scrape_content, url): url for url in filtered_urls}
             scraped_candidates = [future.result() for future in as_completed(future_to_url)]
             
-            # Luego, sometemos a juicio a los que tienen contenido
             candidates_for_judgement = [c for c in scraped_candidates if c['text_content']]
             print(f"--- FASE 2: Sometiendo a juicio de IA a {len(candidates_for_judgement)} candidatos con contenido. ---")
             
@@ -213,7 +223,6 @@ class SmartShoppingBot:
                 except Exception as e:
                     print(f"  ❌ Error procesando el juicio del producto {candidate_data['title']}: {e}")
         
-        # --- FASE 3: ORDENAR Y DEVOLVER ---
         if not validated_products:
             print("🤔 Después del juicio de IA, no quedaron resultados de alta calidad.")
             return [], [], errors_list
@@ -234,7 +243,9 @@ def index():
 
 @app.route('/login', methods=['POST'])
 def login():
-    if not FIREBASE_WEB_API_KEY: flash('El servicio de autenticación no está configurado.', 'danger'); return redirect(url_for('index'))
+    if not FIREBASE_WEB_API_KEY:
+        flash('El servicio de autenticación no está configurado.', 'danger')
+        return redirect(url_for('index'))
     email, password = request.form.get('email'), request.form.get('password')
     rest_api_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={FIREBASE_WEB_API_KEY}"
     payload = {'email': email, 'password': password, 'returnSecureToken': True}
@@ -257,11 +268,15 @@ def login():
 
 @app.route('/logout')
 def logout():
-    session.clear(); flash('Has cerrado la sesión.', 'success'); return redirect(url_for('index'))
+    session.clear()
+    flash('Has cerrado la sesión.', 'success')
+    return redirect(url_for('index'))
 
 @app.route('/app')
 def main_app_page():
-    if 'user_id' not in session: flash('Debes iniciar sesión para acceder.', 'warning'); return redirect(url_for('index'))
+    if 'user_id' not in session:
+        flash('Debes iniciar sesión para acceder.', 'warning')
+        return redirect(url_for('index'))
     return render_template_string(SEARCH_TEMPLATE, user_name=session.get('user_name', 'Usuario'))
 
 @app.route('/api/search', methods=['POST'])
@@ -279,4 +294,5 @@ def api_search():
 # ==============================================================================
 # SECCIÓN 4: PLANTILLAS HTML Y EJECUCIÓN
 # ==============================================================================
-AUTH_TEMPLATE_LOGIN_ONLY = """<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Acceso | Smart Shopping Bot</title><link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet"><style>:root{--primary-color:#4A90E2;--secondary-color:#50E3C2;--text-color-dark:#2C3E50;--card-bg:#FFFFFF;--shadow-medium:rgba(0,0,0,0.15)}body{font-family:'Poppins',sans-serif;background:linear-gradient(135deg,var(--primary-color) 0%,var(--secondary-color) 100%);min-height:100vh;display:flex;justify-content:center;align-items:center;padding:20px}.auth-container{max-width:480px;width:100%;background:var(--card-bg);border-radius:20px;box-shadow:0 25px 50px var(--shadow-medium);overflow:hidden;animation:fadeIn .8s ease-out}@keyframes fadeIn{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}.form-header{text-align:center;padding:40px 30px 20px}.form-header h1{color:var(--text-color-dark);font-size:2em;margin-bottom:10px}.form-header p{color:#7f8c8d;font-size:1.1em}.form-body{padding:10px 40px 40px}form{display:flex;flex-direction:column;gap:20px}.input-group{display:flex;flex-direction:column;gap:8px}.input-group label{font-weight:600;color:var(--text-color-dark);font-size:.95em}.input-group input{padding:16px 20px;border:2px solid #e0e0e0;border-radius:12px;font-size:16px;transition:all .3s ease}.input-group input:focus{outline:0;border-color:var(--primary-color);box-shadow:0 0 0 4px rgba(74,144,226,.2)}.submit-btn{background:linear-gradient(45deg,var(--primary-color),#2980b9);color:#fff;border:none;padding:16px 30px;font-size:1.1em;font-weight:600;border-radius:12px;cursor:pointer;transition:all .3s ease;margin-top:15px}.submit-btn:hover{transform:translateY(-3px);box-shadow:0 12px 25px rgba(0,0,0,.2)}.flash-messages{list-style:none;padding:0 40px 20px}.flash{padding:15px;margin-bottom:15px;border-radius:8px;text-align:center}.flash.success{background-color:#d4edda;color:#155724}.flash.danger{background-color:#f8d7da;color:#721c24}.flash.warning{background-color:#fff3cd;color:#856404}</style></head><body><div class="auth-container"><div class="form-header"><h1>Bienvenido de Nuevo</h1><p>Accede para encontrar las mejores ofertas.</p></div>{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<ul class=flash-messages>{% for category, message in messages %}<li class="flash {{ category }}">{{ message }}</li>{% endfor %}</ul>{% endif %}{% endwith %}<div class="form-body"><form id="login-form" action="{{ url_for('login') }}" method="post"><div class="input-group"><label for="login-email">Correo</label><input
+AUTH_TEMPLATE_LOGIN_ONLY = """
+<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Acceso | Smart Shopping Bot</title><link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet"><style>:root{--primary-color:#4A90E2;--secondary-color:#50E3C2;--text-color-dark:#2C3E50;--card-bg:#FFFFFF;--shadow-medium:rgba(0,0,0,0.15)}body{font-family:'Poppins',sans-serif;background:linear-gradient(135deg,var(--primary-color) 0%,var(--secondary-color) 100%);min-height:100vh;display:flex;justify-content:center;align-items:center;padding:20px}.auth-container{max-width:480px;width:100%;background:var(--card-bg);border-radius:20px;box-shadow:0 25px 50px var(--shadow-medium);overflow:hidden;animation:fadeIn .8s ease-out}@keyframes fadeIn{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}.form-header{text-align:center;padding:40px 30px 20px}.form-header h1{color:var(--text-color-dark);font-size:2em;margin-bottom:10px}.form-header p{color:#7f8c8d;font-size:1.1em}.form-body{padding:10px 40px 40px
