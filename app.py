@@ -1,13 +1,13 @@
-# app.py (versión 20.0 - Motor de Prioridad de Precios)
+# app.py (versión 21.0 - Motor de Búsqueda Resiliente)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 20.0 (Price-First Engine)
+# Versión: 21.0 (Resilient Search Engine)
 # Novedades:
-# - ORDENACIÓN DIRECTA POR PRECIO: Se elimina el complejo 'Deal Score'. Los resultados ahora se ordenan estrictamente por precio (del más barato al más caro).
-# - BÚSQUEDA MULTI-TIENDA AMPLIADA: Se han añadido más tiendas prioritarias como Walmart, Target y Best Buy a la búsqueda exhaustiva.
-# - AUMENTO DE LA CANTIDAD DE RESULTADOS: Se ha incrementado el número de candidatos a validar y el máximo de resultados a mostrar para obtener listas más completas.
-# - FILTRO GEOGRÁFICO DE EE.UU. MANTENIDO: El filtro que asegura que los resultados sean de Estados Unidos sigue siendo una prioridad estricta.
+# - BÚSQUEDA FLEXIBLE AUTOMÁTICA (FALLBACK): Si la búsqueda precisa inicial no encuentra resultados, la IA genera una consulta más amplia y el sistema vuelve a buscar.
+# - SUGERENCIA DE PRODUCTOS SIMILARES: Los resultados de la búsqueda flexible se presentan como "opciones similares", cumpliendo la solicitud del usuario.
+# - MENSAJE DE USUARIO MEJORADO: La interfaz ahora muestra un mensaje contextual cuando se devuelven resultados de la búsqueda flexible.
+# - ARQUITECTURA ROBUSTA: Se mantiene el motor de producción endurecido y la ordenación por precio.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -60,7 +60,7 @@ class ProductResult:
     name: str; store: str; url: str; image_url: str = ""
     price_in_usd: float = 0.0; original_price: float = 0.0; original_currency: str = "USD"
     relevance_score: int = 0; price_accuracy_score: int = 0;
-    reasoning: str = ""
+    reasoning: str = ""; is_alternative_suggestion: bool = False
 
 CURRENCY_RATES_TO_USD = {"USD": 1.0, "DOP": 0.017, "MXN": 0.054, "CAD": 0.73, "EUR": 1.08, "GBP": 1.27}
 
@@ -92,6 +92,22 @@ def _enhance_query_for_purchase(text: str, errors_list: List[str]) -> str:
         return text
     except Exception: return text
 
+def _get_fallback_query_from_ai(original_query: str, errors_list: List[str]) -> Optional[str]:
+    """Genera una consulta de búsqueda más amplia cuando la inicial falla."""
+    if not genai: return None
+    print(f"  🤔 La búsqueda precisa de '{original_query}' falló. Generando una consulta flexible...")
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        prompt = f"A search for '{original_query}' yielded no results. Generate a single, slightly broader but still relevant search query in English that is likely to find similar products. For example, for '2 inch 3M 471 blue vinyl tape', a good fallback might be '2 inch blue vinyl tape' or 'wide blue adhesive tape'. Respond ONLY with the new query."
+        response = model.generate_content(prompt)
+        fallback_query = response.text.strip()
+        print(f"  💡 Consulta flexible generada: '{fallback_query}'")
+        return fallback_query
+    except google_exceptions.ResourceExhausted as e:
+        errors_list.append("Advertencia: Cuota de API superada al intentar generar sugerencias.")
+        return None
+    except Exception: return None
+
 def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list: List[str]) -> Dict[str, Any]:
     default_failure = {"relevance_score": 0, "price_accuracy_score": 0}
     if not genai or not candidate.get('text_content'): return default_failure
@@ -122,7 +138,6 @@ def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
-        # MODIFICACIÓN: Aumentar la cantidad de resultados
         self.TOP_N_CANDIDATES_TO_VALIDATE = 40
         self.MAX_RESULTS_TO_RETURN = 30
 
@@ -140,17 +155,12 @@ class SmartShoppingBot:
         return urls
 
     def get_candidate_urls_exhaustively(self, base_query: str, original_query: str) -> List[str]:
-        print("--- FASE 1: Iniciando Búsqueda Exhaustiva de Candidatos ---")
         tasks = []
-        # MODIFICACIÓN: Añadir más tiendas a la búsqueda dirigida
         high_priority_stores = ["amazon.com", "walmart.com", "ebay.com", "target.com", "bestbuy.com", "homedepot.com", "lowes.com", "grainger.com", "uline.com", "zoro.com"]
-        
-        # MODIFICACIÓN: Aumentar la profundidad de búsqueda a 3 páginas
         for i in range(3): tasks.append({"query": base_query, "engine": "google", "start": i * 10})
         tasks.append({"query": base_query, "engine": "google_shopping", "start": 0})
         for store in high_priority_stores: tasks.append({"query": f'site:{store} "{original_query}"', "engine": "google", "start": 0})
         tasks.append({"query": f'"{original_query}" cheap', "engine": "google", "start": 0})
-
         print(f"  🔥 Ejecutando {len(tasks)} tareas de búsqueda en paralelo...")
         all_urls = set()
         with ThreadPoolExecutor(max_workers=10) as executor:
@@ -158,6 +168,36 @@ class SmartShoppingBot:
             for future in as_completed(future_to_task):
                 for url in future.result(): all_urls.add(url)
         return list(all_urls)
+    
+    def _process_and_validate_candidates(self, candidate_urls: List[str], original_query: str, errors_list: List[str], is_fallback: bool = False) -> List[ProductResult]:
+        blacklist = ['pinterest.com', 'youtube.com', 'wikipedia.org', 'facebook.com']
+        filtered_urls = [url for url in candidate_urls if not any(site in url for site in blacklist)]
+        
+        print(f"--- {len(filtered_urls)} URLs candidatas pasarán a la fase de scrape y juicio. ---")
+        if not filtered_urls: return []
+
+        analyzed_products = []
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            scraped_candidates = list(executor.map(_deep_scrape_content, filtered_urls))
+            candidates_for_judgement = [c for c in scraped_candidates if c['text_content']]
+            print(f"--- FASE 2: Sometiendo a juicio de IA a {len(candidates_for_judgement)} candidatos. ---")
+            
+            future_to_candidate = {executor.submit(_get_ai_analysis, c, original_query, errors_list): c for c in candidates_for_judgement}
+            for future in as_completed(future_to_candidate):
+                candidate_data, analysis = future_to_candidate[future], future.result()
+                if analysis.get('is_usa_centric', False) and analysis.get('relevance_score', 0) >= 5 and analysis.get('price_accuracy_score', 0) >= 5:
+                    currency = analysis.get('currency', 'USD').upper(); rate = CURRENCY_RATES_TO_USD.get(currency)
+                    if rate:
+                        original_price = float(analysis['price']); price_in_usd = original_price * rate
+                        if price_in_usd >= 0.50:
+                            analyzed_products.append(ProductResult(
+                                name=candidate_data['title'], store=urlparse(candidate_data['url']).netloc.replace('www.', '').split('.')[0].capitalize(),
+                                url=candidate_data['url'], image_url=candidate_data['image'],
+                                price_in_usd=price_in_usd, original_price=original_price, original_currency=currency,
+                                relevance_score=analysis['relevance_score'], price_accuracy_score=analysis['price_accuracy_score'], 
+                                reasoning=analysis.get('reasoning', ''), is_alternative_suggestion=is_fallback
+                            ))
+        return analyzed_products
 
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str], List[str]]:
         errors_list = []
@@ -165,43 +205,29 @@ class SmartShoppingBot:
             original_query = query.strip() if query else "product from image"
             if not original_query: return [], [], []
 
+            # --- INTENTO 1: BÚSQUEDA DE ALTA PRECISIÓN ---
+            print("--- Iniciando Búsqueda de Alta Precisión ---")
             enhanced_query = _enhance_query_for_purchase(original_query, errors_list)
             if not enhanced_query: return [], ["No se pudo generar una consulta válida."], errors_list
             
             candidate_urls = self.get_candidate_urls_exhaustively(enhanced_query, original_query)
-            blacklist = ['pinterest.com', 'youtube.com', 'wikipedia.org', 'facebook.com']
-            filtered_urls = [url for url in candidate_urls if not any(site in url for site in blacklist)]
-            
-            print(f"--- {len(filtered_urls)} URLs candidatas pasarán a la fase de scrape y juicio. ---")
-            if not filtered_urls: return [], [], errors_list
+            final_results = self._process_and_validate_candidates(candidate_urls, original_query, errors_list)
 
-            analyzed_products = []
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                scraped_candidates = list(executor.map(_deep_scrape_content, filtered_urls))
-                candidates_for_judgement = [c for c in scraped_candidates if c['text_content']]
-                print(f"--- FASE 2: Sometiendo a juicio de IA a {len(candidates_for_judgement)} candidatos. ---")
-                
-                future_to_candidate = {executor.submit(_get_ai_analysis, c, original_query, errors_list): c for c in candidates_for_judgement}
-                for future in as_completed(future_to_candidate):
-                    candidate_data, analysis = future_to_candidate[future], future.result()
-                    # MODIFICACIÓN: Filtro estricto de EE.UU. y calidad mínima
-                    if analysis.get('is_usa_centric', False) and analysis.get('relevance_score', 0) >= 5 and analysis.get('price_accuracy_score', 0) >= 5:
-                        currency = analysis.get('currency', 'USD').upper(); rate = CURRENCY_RATES_TO_USD.get(currency)
-                        if rate:
-                            original_price = float(analysis['price']); price_in_usd = original_price * rate
-                            if price_in_usd >= 0.50:
-                                analyzed_products.append(ProductResult(
-                                    name=candidate_data['title'], store=urlparse(candidate_data['url']).netloc.replace('www.', '').split('.')[0].capitalize(),
-                                    url=candidate_data['url'], image_url=candidate_data['image'],
-                                    price_in_usd=price_in_usd, original_price=original_price, original_currency=currency,
-                                    relevance_score=analysis['relevance_score'], price_accuracy_score=analysis['price_accuracy_score'], reasoning=analysis.get('reasoning', '')
-                                ))
+            # --- INTENTO 2: BÚSQUEDA FLEXIBLE (FALLBACK) ---
+            if not final_results:
+                print("--- Búsqueda de Alta Precisión sin resultados. Iniciando Búsqueda Flexible. ---")
+                fallback_query = _get_fallback_query_from_ai(original_query, errors_list)
+                if fallback_query:
+                    fallback_candidate_urls = self.get_candidate_urls_exhaustively(fallback_query, fallback_query)
+                    final_results = self._process_and_validate_candidates(fallback_candidate_urls, original_query, errors_list, is_fallback=True)
+                    if final_results:
+                        errors_list.insert(0, "No encontramos resultados exactos. Pero aquí hay algunas opciones similares que podrían interesarte.")
+
+            if not final_results: 
+                print("✅ BÚSQUEDA COMPLETA. No se encontraron ofertas de alta calidad, incluso después del fallback.")
+                return [], [], errors_list
             
-            if not analyzed_products: return [], [], errors_list
-            
-            # --- FASE 3: ORDENAR POR PRECIO ---
-            # MODIFICACIÓN: Se elimina el 'deal_score' y se ordena directamente por el precio más bajo.
-            final_results = sorted(analyzed_products, key=lambda p: p.price_in_usd)
+            final_results = sorted(final_results, key=lambda p: p.price_in_usd)
             
             print(f"✅ BÚSQUEDA COMPLETA. Se encontraron {len(final_results)} ofertas de calidad.")
             return final_results[:self.MAX_RESULTS_TO_RETURN], [], errors_list
@@ -274,6 +300,7 @@ SEARCH_TEMPLATE = """
     const resultsSection = document.getElementById("results-section");
     const productsGrid = document.getElementById("products-grid");
     const apiErrorsDiv = document.getElementById("api-errors");
+    const resultsTitle = document.getElementById("results-title");
 
     function performSearch() {
         const formData = new FormData(searchForm);
@@ -289,16 +316,25 @@ SEARCH_TEMPLATE = """
         }).then(response => response.json()).then(data => {
             loadingDiv.style.display = "none";
 
+            // Lógica para mostrar mensaje de búsqueda flexible
+            let isAlternative = data.results.length > 0 && data.results[0].is_alternative_suggestion;
             if (data.errors && data.errors.length > 0) {
-                let errorHTML = '<strong>Advertencias durante la búsqueda:</strong><ul>';
+                let errorHTML = '<ul>';
                 data.errors.forEach(error => { errorHTML += `<li>${error}</li>`; });
                 errorHTML += '</ul>';
                 apiErrorsDiv.innerHTML = errorHTML;
                 apiErrorsDiv.style.display = "block";
+                resultsTitle.style.display = "none";
+            }
+
+            if (isAlternative) {
+                resultsTitle.innerText = "No encontramos resultados exactos. Pero aquí hay algunas opciones similares:";
+            } else {
+                resultsTitle.innerText = "Las Mejores Ofertas Encontradas";
             }
 
             if (data.results && data.results.length > 0) {
-                document.getElementById("results-title").style.display = "block";
+                resultsTitle.style.display = "block";
                 data.results.forEach(product => {
                     const reasoning = product.reasoning.replace(/"/g, '"');
                     const originalPrice = `${product.original_price.toFixed(2)} ${product.original_currency}`;
@@ -315,7 +351,7 @@ SEARCH_TEMPLATE = """
                         </div>`;
                 });
             } else {
-                document.getElementById("results-title").style.display = "none";
+                resultsTitle.style.display = "none";
                 if (!apiErrorsDiv.innerHTML) {
                     productsGrid.innerHTML = "<p>No se encontraron ofertas de alta calidad para tu búsqueda.</p>";
                 }
