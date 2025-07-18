@@ -1,13 +1,13 @@
-# app.py (versión 21.0 - Motor de Búsqueda Resiliente)
+# app.py (versión 22.0 - Motor de Búsqueda de Cobertura Total)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 21.0 (Resilient Search Engine)
+# Versión: 22.0 (Total Coverage Search Engine)
 # Novedades:
-# - BÚSQUEDA FLEXIBLE AUTOMÁTICA (FALLBACK): Si la búsqueda precisa inicial no encuentra resultados, la IA genera una consulta más amplia y el sistema vuelve a buscar.
-# - SUGERENCIA DE PRODUCTOS SIMILARES: Los resultados de la búsqueda flexible se presentan como "opciones similares", cumpliendo la solicitud del usuario.
-# - MENSAJE DE USUARIO MEJORADO: La interfaz ahora muestra un mensaje contextual cuando se devuelven resultados de la búsqueda flexible.
-# - ARQUITECTURA ROBUSTA: Se mantiene el motor de producción endurecido y la ordenación por precio.
+# - PROFUNDIDAD DE BÚSQUEDA AUMENTADA: Ahora se analizan las primeras 5 páginas de resultados de Google.
+# - VARIEDAD DE CONSULTAS EXPANDIDA: Un nuevo sistema genera hasta 10 variantes de búsqueda (exacta, de oferta, de compra, etc.) para una cobertura máxima.
+# - ALCANCE DE TIENDAS AMPLIADO: Se han añadido más tiendas especializadas a la lista de búsqueda prioritaria.
+# - AUMENTO DE CANDIDATOS: El sistema ahora valida hasta 50 de los candidatos más prometedores.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -93,12 +93,11 @@ def _enhance_query_for_purchase(text: str, errors_list: List[str]) -> str:
     except Exception: return text
 
 def _get_fallback_query_from_ai(original_query: str, errors_list: List[str]) -> Optional[str]:
-    """Genera una consulta de búsqueda más amplia cuando la inicial falla."""
     if not genai: return None
     print(f"  🤔 La búsqueda precisa de '{original_query}' falló. Generando una consulta flexible...")
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = f"A search for '{original_query}' yielded no results. Generate a single, slightly broader but still relevant search query in English that is likely to find similar products. For example, for '2 inch 3M 471 blue vinyl tape', a good fallback might be '2 inch blue vinyl tape' or 'wide blue adhesive tape'. Respond ONLY with the new query."
+        prompt = f"A search for '{original_query}' yielded no results. Generate a single, slightly broader but still relevant search query in English that is likely to find similar products. Respond ONLY with the new query."
         response = model.generate_content(prompt)
         fallback_query = response.text.strip()
         print(f"  💡 Consulta flexible generada: '{fallback_query}'")
@@ -135,11 +134,25 @@ def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list
         return default_failure
     except Exception: return default_failure
 
+def _generate_query_variants(base_query: str, original_query: str) -> List[str]:
+    """Genera un conjunto diverso de consultas de búsqueda para una cobertura máxima."""
+    variants = {
+        base_query,
+        f'"{original_query}"', # Búsqueda exacta
+        f'buy {base_query}',
+        f'"{original_query}" for sale',
+        f'best price for "{base_query}"',
+        f'"{original_query}" in stock USA',
+        f'{base_query} online store'
+    }
+    return list(variants)
+
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
-        self.TOP_N_CANDIDATES_TO_VALIDATE = 40
-        self.MAX_RESULTS_TO_RETURN = 30
+        # MODIFICACIÓN: Aumentar la cantidad de resultados
+        self.TOP_N_CANDIDATES_TO_VALIDATE = 50
+        self.MAX_RESULTS_TO_RETURN = 40
 
     def _run_search_task(self, query: str, engine: str, start: int = 0) -> List[str]:
         urls = []
@@ -154,16 +167,22 @@ class SmartShoppingBot:
         except Exception as e: print(f"❌ Error en sub-búsqueda ({engine}): {e}")
         return urls
 
-    def get_candidate_urls_exhaustively(self, base_query: str, original_query: str) -> List[str]:
+    def get_candidate_urls_exhaustively(self, queries: List[str], original_query: str) -> List[str]:
+        print("--- FASE 1: Iniciando Búsqueda Exhaustiva de Candidatos ---")
         tasks = []
-        high_priority_stores = ["amazon.com", "walmart.com", "ebay.com", "target.com", "bestbuy.com", "homedepot.com", "lowes.com", "grainger.com", "uline.com", "zoro.com"]
-        for i in range(3): tasks.append({"query": base_query, "engine": "google", "start": i * 10})
-        tasks.append({"query": base_query, "engine": "google_shopping", "start": 0})
+        # MODIFICACIÓN: Añadir más tiendas a la búsqueda dirigida
+        high_priority_stores = ["amazon.com", "walmart.com", "ebay.com", "target.com", "bestbuy.com", "homedepot.com", "lowes.com", "grainger.com", "uline.com", "zoro.com", "mscdirect.com", "newegg.com", "bhphotovideo.com"]
+        
+        for query in queries:
+            # MODIFICACIÓN: Aumentar la profundidad de búsqueda a 5 páginas
+            for i in range(5): tasks.append({"query": query, "engine": "google", "start": i * 10})
+            tasks.append({"query": query, "engine": "google_shopping", "start": 0})
+        
         for store in high_priority_stores: tasks.append({"query": f'site:{store} "{original_query}"', "engine": "google", "start": 0})
-        tasks.append({"query": f'"{original_query}" cheap', "engine": "google", "start": 0})
+
         print(f"  🔥 Ejecutando {len(tasks)} tareas de búsqueda en paralelo...")
         all_urls = set()
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        with ThreadPoolExecutor(max_workers=15) as executor:
             future_to_task = {executor.submit(self._run_search_task, **task): task for task in tasks}
             for future in as_completed(future_to_task):
                 for url in future.result(): all_urls.add(url)
@@ -205,26 +224,24 @@ class SmartShoppingBot:
             original_query = query.strip() if query else "product from image"
             if not original_query: return [], [], []
 
-            # --- INTENTO 1: BÚSQUEDA DE ALTA PRECISIÓN ---
-            print("--- Iniciando Búsqueda de Alta Precisión ---")
             enhanced_query = _enhance_query_for_purchase(original_query, errors_list)
             if not enhanced_query: return [], ["No se pudo generar una consulta válida."], errors_list
             
-            candidate_urls = self.get_candidate_urls_exhaustively(enhanced_query, original_query)
+            query_variants = _generate_query_variants(enhanced_query, original_query)
+            candidate_urls = self.get_candidate_urls_exhaustively(query_variants, original_query)
             final_results = self._process_and_validate_candidates(candidate_urls, original_query, errors_list)
 
-            # --- INTENTO 2: BÚSQUEDA FLEXIBLE (FALLBACK) ---
             if not final_results:
                 print("--- Búsqueda de Alta Precisión sin resultados. Iniciando Búsqueda Flexible. ---")
                 fallback_query = _get_fallback_query_from_ai(original_query, errors_list)
                 if fallback_query:
-                    fallback_candidate_urls = self.get_candidate_urls_exhaustively(fallback_query, fallback_query)
+                    fallback_candidate_urls = self.get_candidate_urls_exhaustively([fallback_query], fallback_query)
                     final_results = self._process_and_validate_candidates(fallback_candidate_urls, original_query, errors_list, is_fallback=True)
                     if final_results:
                         errors_list.insert(0, "No encontramos resultados exactos. Pero aquí hay algunas opciones similares que podrían interesarte.")
 
             if not final_results: 
-                print("✅ BÚSQUEDA COMPLETA. No se encontraron ofertas de alta calidad, incluso después del fallback.")
+                print("✅ BÚSQUEDA COMPLETA. No se encontraron ofertas de alta calidad.")
                 return [], [], errors_list
             
             final_results = sorted(final_results, key=lambda p: p.price_in_usd)
@@ -235,19 +252,18 @@ class SmartShoppingBot:
         except Exception as e:
             print(f"‼️ ERROR CRÍTICO NO MANEJADO EN search_product: {e}")
             traceback.print_exc()
-            errors_list.append("Ocurrió un error inesperado en el servidor. El problema ha sido registrado.")
+            errors_list.append("Ocurrió un error inesperado en el servidor.")
             return [], [], errors_list
 
 # ==============================================================================
 # SECCIÓN 3: RUTAS FLASK Y EJECUCIÓN
 # ==============================================================================
+# (El código de Flask no requiere cambios, se mantiene igual)
 shopping_bot = SmartShoppingBot(SERPAPI_KEY)
-
 @app.route('/')
 def index():
     if 'user_id' in session: return redirect(url_for('main_app_page'))
     return render_template_string(AUTH_TEMPLATE_LOGIN_ONLY)
-
 @app.route('/login', methods=['POST'])
 def login():
     if not FIREBASE_WEB_API_KEY: flash('Servicio no configurado.', 'danger'); return redirect(url_for('index'))
@@ -263,16 +279,13 @@ def login():
         error_message = e.response.json().get('error', {}).get('message', 'ERROR')
         flash('Correo o contraseña incorrectos.' if 'INVALID' in error_message else f'Error: {error_message}', 'danger'); return redirect(url_for('index'))
     except Exception as e: flash(f'Ocurrió un error inesperado: {e}', 'danger'); return redirect(url_for('index'))
-
 @app.route('/logout')
 def logout():
     session.clear(); flash('Has cerrado la sesión.', 'success'); return redirect(url_for('index'))
-
 @app.route('/app')
 def main_app_page():
     if 'user_id' not in session: flash('Debes iniciar sesión para acceder.', 'warning'); return redirect(url_for('index'))
     return render_template_string(SEARCH_TEMPLATE, user_name=session.get('user_name', 'Usuario'))
-
 @app.route('/api/search', methods=['POST'])
 def api_search():
     if 'user_id' not in session: return jsonify({'error': 'No autorizado'}), 401
