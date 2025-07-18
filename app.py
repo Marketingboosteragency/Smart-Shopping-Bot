@@ -1,13 +1,12 @@
-# app.py (versión 14.1 - Motor Híbrido + Traducción Interna IA)
+# app.py (versión 14.2 - Filtro de Precios y Traducción)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 14.1 (Hybrid Search & Expert Image Analysis with Internal Translation)
+# Versión: 14.2 (Price Filtering & Internal Translation)
 # Novedades:
-# - NUEVO: Función de traducción interna para convertir consultas de texto a inglés.
-# - Se asegura que todas las búsquedas (texto, imagen, combinadas) se ejecuten en inglés para resultados optimizados en EE.UU.
-# - Se reemplaza Google Vision por un análisis directo con Gemini Vision experto.
-# - Se implementa un motor de búsqueda dual (Profundo + Google Shopping) para máxima robustez.
+# - NUEVO: Se descartan automáticamente los resultados con un precio inferior a $0.50 para eliminar datos obsoletos o incorrectos.
+# - Se mantiene la función de traducción interna para consultas en inglés.
+# - Se mantiene el motor de búsqueda híbrido y el análisis de imágenes experto.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -93,11 +92,8 @@ def _get_product_category(query: str) -> str:
     except Exception:
         return "consumer_tech"
 
-# --- NUEVA FUNCIÓN DE TRADUCCIÓN ---
 def _translate_to_english(text: str) -> str:
-    """Traduce un texto a inglés usando Gemini para optimizar búsquedas en EE.UU."""
-    if not genai or not text:
-        return text  # Devuelve el texto original si Gemini no está disponible o el texto está vacío
+    if not genai or not text: return text
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         prompt = f"Translate the following text to English. Respond ONLY with the translated text, without any introductory phrases or quotation marks.\n\nText: '{text}'"
@@ -107,7 +103,7 @@ def _translate_to_english(text: str) -> str:
         return translated_text
     except Exception as e:
         print(f"  ❌ Error durante la traducción con Gemini: {e}. Se usará la consulta original.")
-        return text # En caso de error, regresa el texto original para no interrumpir el flujo
+        return text
 
 def _verify_is_product_page(query: str, page_title: str, page_content: str, category: str) -> bool:
     if not genai: return True
@@ -182,7 +178,8 @@ class SmartShoppingBot:
                     try:
                         price_str = item.get('extracted_price', item['price'])
                         price_float = float(re.sub(r'[^\d.]', '', str(price_str)))
-                        if price_float >= 0.99:
+                        # --- MODIFICADO: Filtro de precio mínimo ---
+                        if price_float >= 0.50:
                             products.append(ProductResult(name=item['title'], price=price_float, store=item.get('source', 'Google'), url=item['link'], image_url=item.get('thumbnail', '')))
                     except (ValueError, TypeError): continue
             print(f"✅ Google Shopping encontró {len(products)} resultados válidos.")
@@ -210,34 +207,24 @@ class SmartShoppingBot:
                         if _verify_is_product_page(query, content['title'], content['text'], category):
                             try:
                                 price_float = float(content['price'])
-                                if price_float >= 0.99:
+                                # --- MODIFICADO: Filtro de precio mínimo ---
+                                if price_float >= 0.50:
                                     valid_results.append(ProductResult(name=content['title'], price=price_float, store=_get_clean_company_name(item), url=item.get('link'), image_url=content['image'] or item.get('thumbnail', '')))
                             except (ValueError, TypeError): continue
             return valid_results
         except Exception as e:
             print(f"❌ Ocurrió un error en la búsqueda profunda: {e}"); return []
 
-    # --- MÉTODO search_product ACTUALIZADO ---
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str]]:
         text_query = query.strip() if query else None
-        
-        # Paso de traducción interna: convierte la consulta de texto a inglés.
         translated_text_query = _translate_to_english(text_query) if text_query else None
-        
-        # El análisis de imagen ya está configurado para devolver una consulta en inglés.
         image_query = self.get_descriptive_query_from_image(image_content) if image_content else None
         
         final_query = None
-        if translated_text_query and image_query:
-            final_query = self._combine_text_and_image_query(translated_text_query, image_query)
-        elif translated_text_query:
-            final_query = translated_text_query
-        elif image_query:
-            final_query = image_query
-            
-        if not final_query:
-            print("❌ No se pudo determinar una consulta válida.")
-            return [], []
+        if translated_text_query and image_query: final_query = self._combine_text_and_image_query(translated_text_query, image_query)
+        elif translated_text_query: final_query = translated_text_query
+        elif image_query: final_query = image_query
+        if not final_query: print("❌ No se pudo determinar una consulta válida."); return [], []
         
         category = _get_product_category(final_query)
         print(f"🔍 Lanzando búsqueda HÍBRIDA ({category}) para la consulta final en inglés: '{final_query}'")
