@@ -2,12 +2,12 @@
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 14.9 (Relevance & Precision Engine)
+# Versión: 14.9 (Relevance & Precision Engine - Corrected & Hardened)
 # Novedades:
-# - ARQUITECTURA PROFESIONAL: Flujo `Recolectar -> Analizar TODO -> Filtrar -> Ordenar`. La relevancia se valida ANTES de considerar el precio.
-# - "JUICIO DE LA IA": La IA devuelve un JSON estructurado con análisis de relevancia, precio por unidad, y una puntuación de confianza.
-# - SOLUCIÓN AL PROBLEMA DE "BULK": La IA ahora calcula el `price_per_unit`, normalizando los precios de packs y cajas.
-# - EXPANSIÓN MASIVA DE CONSULTAS: Se generan múltiples variantes de búsqueda para una cobertura de mercado exhaustiva.
+# - CORRECCIÓN CRÍTICA: Se restaura la función `_enhance_query_for_purchase` para eliminar el `NameError`.
+# - INTEGRACIÓN COMPLETA: La búsqueda por imagen ahora está completamente integrada en el motor de relevancia.
+# - ROBUSTEZ MEJORADA: El proceso de validación por IA ahora maneja excepciones individuales sin detener la búsqueda completa.
+# - ARQUITECTURA PROFESIONAL: Mantiene el flujo `Recolectar -> Analizar TODO -> Filtrar -> Ordenar` para máxima calidad de resultados.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -16,7 +16,6 @@ import re
 import json
 import os
 import io
-import time
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from urllib.parse import urlparse, urljoin
@@ -63,7 +62,6 @@ class ProductResult:
     url: str
     image_url: str = ""
     text_content: str = ""
-    # Nuevos campos para el análisis de IA
     is_validated: bool = False
     relevance_reasoning: str = ""
     confidence_score: float = 0.0
@@ -100,6 +98,21 @@ def _deep_scrape_content(url: str) -> Dict[str, Any]:
     except Exception:
         return {'title': 'N/A', 'price': 'N/A', 'image': '', 'has_add_to_cart': False, 'text_content': ''}
 
+def _enhance_query_for_purchase(text: str, errors_list: List[str]) -> str:
+    if not genai or not text: return text
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        prompt = f"A user wants to buy a product. Enhance and translate their search query into a specific, detailed English query suitable for finding the product for sale online. Include relevant keywords like size, type, or 'for sale'. User query: '{text}'. Respond ONLY with the enhanced English query."
+        response = model.generate_content(prompt)
+        enhanced_query = response.text.strip()
+        print(f"  🧠 Consulta mejorada por IA: de '{text}' a '{enhanced_query}'.")
+        return enhanced_query
+    except google_exceptions.ResourceExhausted as e:
+        error_msg = "Advertencia: Cuota de API superada para mejorar la consulta. Usando texto original."
+        if error_msg not in errors_list: errors_list.append(error_msg)
+        return text
+    except Exception: return text
+
 def _get_relevance_and_price_analysis_from_ai(product: ProductResult, original_query: str, errors_list: List[str]) -> Dict[str, Any]:
     default_failure = {"is_highly_relevant": False, "price_per_unit": 99999, "reasoning": "AI validation failed.", "confidence_score": 0.0}
     if not genai: return default_failure
@@ -127,11 +140,9 @@ def _get_relevance_and_price_analysis_from_ai(product: ProductResult, original_q
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         response = model.generate_content(prompt)
-        # Limpiar la respuesta para que sea un JSON válido
         cleaned_response = response.text.strip().replace("```json", "").replace("```", "")
         analysis = json.loads(cleaned_response)
         
-        # Validar que el JSON tiene los campos esperados
         required_keys = ["is_highly_relevant", "price_per_unit", "confidence_score", "reasoning"]
         if not all(key in analysis for key in required_keys):
              print("  ❌ IA devolvió un JSON con formato incorrecto. Descartando.")
@@ -152,17 +163,31 @@ def _get_relevance_and_price_analysis_from_ai(product: ProductResult, original_q
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
-        self.TOP_N_CANDIDATES_TO_VALIDATE = 15 # Aumentamos el número de candidatos a validar
-        self.CONFIDENCE_THRESHOLD = 0.75 # Umbral de confianza mínimo para mostrar un resultado
+        self.TOP_N_CANDIDATES_TO_VALIDATE = 15
+        self.CONFIDENCE_THRESHOLD = 0.75
+
+    def get_descriptive_query_from_image(self, image_content: bytes, errors_list: List[str]) -> Optional[str]:
+        if not genai: return None
+        print("  📸 Analizando imagen con Gemini Vision...")
+        try:
+            image_pil = Image.open(io.BytesIO(image_content))
+            model = genai.GenerativeModel('gemini-1.5-flash-latest')
+            prompt = "You are an expert product identifier. Analyze the image and generate a single, effective English search query to find this product online. Respond ONLY with the search query."
+            response = model.generate_content([prompt, image_pil])
+            return response.text.strip().replace("*", "")
+        except google_exceptions.ResourceExhausted as e:
+            error_msg = "Advertencia: Cuota de API superada para el análisis de imagen."
+            if error_msg not in errors_list: errors_list.append(error_msg)
+            return None
+        except Exception as e:
+            print(f"  ❌ Fallo en análisis con Gemini Vision: {e}"); return None
 
     def _get_search_results(self, query: str, is_shopping: bool) -> List[ProductResult]:
         engine_name = "Google Shopping" if is_shopping else "Búsqueda Profunda"
         print(f"--- Recolectando candidatos de {engine_name} para: '{query}' ---")
         
-        if is_shopping:
-            params = {"q": query, "engine": "google_shopping", "location": "United States", "gl": "us", "hl": "en", "api_key": self.serpapi_key}
-        else:
-            params = {"q": query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "num": "20", "api_key": self.serpapi_key}
+        params = {"q": query, "engine": "google_shopping" if is_shopping else "google", "location": "United States", "gl": "us", "hl": "en", "api_key": self.serpapi_key}
+        if not is_shopping: params["num"] = "20"
 
         try:
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=45)
@@ -181,7 +206,7 @@ class SmartShoppingBot:
                             if price_float >= 0.50:
                                 products.append(ProductResult(name=item['title'], price=price_float, store=item.get('source', 'Google'), url=item['link'], image_url=item.get('thumbnail', '')))
                         except (ValueError, TypeError): continue
-            else: # Búsqueda Profunda
+            else:
                 blacklist = ['pinterest.com', 'youtube.com', 'wikipedia.org', 'facebook.com', 'twitter.com', 'yelp.com']
                 filtered_links = [item.get('link') for item in results if isinstance(item, dict) and item.get('link') and not any(site in item.get('link') for site in blacklist)]
                 
@@ -203,32 +228,36 @@ class SmartShoppingBot:
 
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str], List[str]]:
         errors_list = []
-        original_query = query.strip() if query else "product from image"
-        if not original_query: return [], [], []
+        original_query = query.strip() if query else None
+        
+        if not original_query and not image_content:
+            return [], ["Por favor, introduce un texto o sube una imagen."], []
 
-        # 1. EXPANSIÓN DE CONSULTAS
-        base_query = _enhance_query_for_purchase(original_query, errors_list)
-        query_variants = list(set([
-            base_query,
-            f'"{original_query}" price',
-            f'buy {original_query} online'
-        ]))
+        final_query = None
+        if original_query:
+            final_query = _enhance_query_for_purchase(original_query, errors_list)
+        
+        if image_content:
+            image_query = self.get_descriptive_query_from_image(image_content, errors_list)
+            if image_query:
+                final_query = f"{final_query} {image_query}" if final_query else image_query
+                if not original_query: original_query = f"product in image ({image_query})" # Set original query for context
+
+        if not final_query: return [], ["No se pudo generar una consulta válida."], errors_list
+        
+        query_variants = list(set([final_query, f'"{original_query}" price', f'buy {original_query} online'])) if original_query else [final_query]
         print(f"--- FASE 1: Expansión de Consultas. Usando {len(query_variants)} variantes. ---")
 
-        # 2. RECOLECCIÓN MASIVA
         all_candidates = []
         with ThreadPoolExecutor(max_workers=len(query_variants) * 2) as executor:
             futures = [executor.submit(self._get_search_results, q, is_shopping) for q in query_variants for is_shopping in [True, False]]
-            for future in as_completed(futures):
-                all_candidates.extend(future.result())
+            for future in as_completed(futures): all_candidates.extend(future.result())
         
-        # Eliminar duplicados
         seen_urls = set()
         unique_candidates = [p for p in all_candidates if p.url not in seen_urls and not seen_urls.add(p.url)]
         print(f"--- Recolección finalizada. {len(unique_candidates)} candidatos únicos encontrados. ---")
         if not unique_candidates: return [], [], errors_list
 
-        # 3. ANÁLISIS Y VALIDACIÓN POR IA
         candidates_to_validate = sorted(unique_candidates, key=lambda x: x.price)[:self.TOP_N_CANDIDATES_TO_VALIDATE]
         print(f"--- FASE 2: Sometiendo a juicio de IA a los {len(candidates_to_validate)} candidatos más prometedores. ---")
 
@@ -240,15 +269,14 @@ class SmartShoppingBot:
                 try:
                     analysis = future.result()
                     if analysis['is_highly_relevant'] and analysis.get('confidence_score', 0) >= self.CONFIDENCE_THRESHOLD:
-                        product.price = float(analysis['price_per_unit']) # Actualizar al precio por unidad
+                        product.price = float(analysis['price_per_unit'])
                         product.relevance_reasoning = analysis['reasoning']
                         product.confidence_score = analysis['confidence_score']
                         product.is_validated = True
                         validated_products.append(product)
                 except Exception as e:
                     print(f"  ❌ Error procesando el juicio del producto {product.name}: {e}")
-
-        # 4. FILTRAR Y ORDENAR
+        
         if not validated_products:
             print("🤔 Después del juicio de IA, no quedaron resultados de alta calidad.")
             return [], [], errors_list
@@ -307,6 +335,7 @@ def api_search():
     results_dicts = [res.__dict__ for res in results]
     return jsonify(results=results_dicts, suggestions=suggestions, errors=errors)
 
+
 # ==============================================================================
 # SECCIÓN 4: PLANTILLAS HTML Y EJECUCIÓN
 # ==============================================================================
@@ -344,7 +373,7 @@ function performSearch() {
                     <div class="product-card">
                         <div class="product-image"><img src="${product.image_url || 'https://via.placeholder.com/300'}" alt="${product.name}" onerror="this.onerror=null;this.src='https://via.placeholder.com/300';"></div>
                         <div class="product-info">
-                            <div class="product-title" title="Reasoning: ${product.relevance_reasoning}\nConfidence: ${product.confidence_score.toFixed(2)}">${product.name}</div>
+                            <div class="product-title" title="Reasoning: ${product.relevance_reasoning.replace(/"/g, '"')}\nConfidence: ${product.confidence_score.toFixed(2)}">${product.name}</div>
                             <div class="price-store-wrapper">
                                 <div class="current-price" title="Precio por unidad">$${product.price.toFixed(2)}</div>
                                 <div class="store-link"><a href="${product.url}" target="_blank">Ver en ${product.store}</a></div>
