@@ -1,12 +1,11 @@
-# app.py (versión 14.4 - Sin Traducción Automática)
+# app.py (versión 14.5 - Modo Ahorro de API)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 14.4 (Translation Removed)
+# Versión: 14.5 (API Saver Mode)
 # Novedades:
-# - Se ha eliminado la función de traducción automática para simplificar el flujo y evitar errores de cuota de la API de Gemini.
-# - La búsqueda por texto ahora se realiza en el idioma original del usuario.
-# - Se mantiene el motor híbrido, el análisis de imágenes, el filtro de precios y el manejo de errores.
+# - Se han eliminado las funciones de IA menos críticas (categorización, sugerencias, verificación de página) para reducir drásticamente el uso de la API y evitar errores de cuota.
+# - El uso de Gemini se centra ahora en el análisis de imágenes y la combinación de consultas.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -14,8 +13,6 @@ import requests
 import re
 import json
 import os
-import time
-import statistics
 import io
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
@@ -82,47 +79,6 @@ def _deep_scrape_content(url: str) -> Dict[str, Any]:
     except Exception:
         return {'title': 'N/A', 'text': '', 'price': 'N/A', 'image': ''}
 
-def _get_product_category(query: str, errors_list: List[str]) -> str:
-    if not genai: return "consumer_tech"
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = (f"Classify the following product search query. Is it for 'industrial_parts' (machinery, car parts, tools, components) or 'consumer_tech' (phones, laptops, electronics, gadgets)? "
-                  f"Query: '{query}'. Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
-        response = model.generate_content(prompt)
-        category = response.text.strip()
-        return category if category in ["industrial_parts", "consumer_tech"] else "consumer_tech"
-    except google_exceptions.ResourceExhausted as e:
-        error_msg = "Advertencia: Se ha superado la cuota de la API de IA. La categorización de productos puede no ser precisa."
-        print(f"  ❌ {error_msg}")
-        if error_msg not in errors_list: errors_list.append(error_msg)
-        return "consumer_tech"
-    except Exception:
-        return "consumer_tech"
-
-def _verify_is_product_page(query: str, page_title: str, page_content: str, category: str) -> bool:
-    if not genai: return True
-    prompt_template = (f"You are a verification analyst. User search: '{query}'. Page title: '{page_title}'. Is this a retail page for the main product, not an accessory or article? Answer YES or NO.")
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        response = model.generate_content(prompt_template)
-        return "YES" in response.text.strip().upper()
-    except Exception: return False
-
-def _get_suggestions_with_gemini(query: str, errors_list: List[str]) -> List[str]:
-    if not genai: return []
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = f"A user searched for '{query}' and found no results. Provide 3 alternative, more effective search queries. Respond with a JSON list of strings, like [\"query 1\", \"query 2\", \"query 3\"]."
-        response = model.generate_content(prompt)
-        cleaned_response = response.text.strip().replace("```json", "").replace("```", "")
-        return json.loads(cleaned_response)
-    except google_exceptions.ResourceExhausted as e:
-        error_msg = "Advertencia: Se ha superado la cuota de la API de IA. No se pudieron generar sugerencias de búsqueda."
-        print(f"  ❌ {error_msg}")
-        if error_msg not in errors_list: errors_list.append(error_msg)
-        return []
-    except Exception: return []
-
 def _get_clean_company_name(item: Dict) -> str:
     try:
         if source := item.get('source'): return source
@@ -139,19 +95,14 @@ class SmartShoppingBot:
 
     def get_descriptive_query_from_image(self, image_content: bytes, errors_list: List[str]) -> Optional[str]:
         if not genai: print("  ❌ Análisis con Gemini Vision saltado."); return None
-        print("  🧠 Analizando imagen con Gemini Vision (Modo Experto Dual)...")
+        print("  🧠 Analizando imagen con Gemini Vision...")
         try:
             image_pil = Image.open(io.BytesIO(image_content))
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            prompt = """You are an expert in identifying both industrial/automotive parts and consumer technology products.
-            Analyze the following image in detail. Identify the main object, its likely material, color, potential brand, and any unique features.
-            Based on your analysis, generate a single, highly effective, and specific search query in English to find this product for sale online.
-            For industrial parts, be very specific (e.g., 'aluminum engine oil pan').
-            For consumer tech, include the model name if recognizable.
-            Respond ONLY with the search query itself, nothing else."""
+            prompt = """You are an expert product identifier. Analyze the image and generate a single, effective English search query to find this product online. Respond ONLY with the search query."""
             response = model.generate_content([prompt, image_pil])
             query = response.text.strip().replace("*", "")
-            print(f"  ✅ Consulta experta generada por Gemini Vision: '{query}'")
+            print(f"  ✅ Consulta generada por Gemini Vision: '{query}'")
             return query
         except google_exceptions.ResourceExhausted as e:
             error_msg = "Advertencia: Se ha superado la cuota de la API de IA. No se pudo analizar la imagen."
@@ -159,16 +110,18 @@ class SmartShoppingBot:
             if error_msg not in errors_list: errors_list.append(error_msg)
             return None
         except Exception as e:
-            print(f"  ❌ Fallo CRÍTICO en análisis con Gemini Vision: {e}"); return None
+            print(f"  ❌ Fallo en análisis con Gemini Vision: {e}"); return None
             
     def _combine_text_and_image_query(self, text_query: str, image_query: str) -> str:
+        # Esta función es de bajo costo y alto valor, así que la mantenemos.
         if not genai: return f"{text_query} {image_query}"
         try:
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            prompt = f"Combine these into a single, effective search query. User's text: '{text_query}'. Description from image: '{image_query}'. Respond only with the final query."
+            prompt = f"Combine these into one effective search query. User's text: '{text_query}'. Description from image: '{image_query}'. Respond only with the final query."
             response = model.generate_content(prompt)
             return response.text.strip()
-        except Exception: return f"{text_query} {image_query}"
+        except Exception: 
+            return f"{text_query} {image_query}"
 
     def search_google_shopping(self, query: str) -> List[ProductResult]:
         print(f"--- Iniciando búsqueda en Google Shopping para: '{query}' ---")
@@ -177,28 +130,20 @@ class SmartShoppingBot:
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
             response.raise_for_status()
             products = []
-            
             shopping_results = response.json().get('shopping_results', [])
-            if not isinstance(shopping_results, list):
-                print("⚠️  El formato de resultados de Google Shopping no es el esperado.")
-                return []
+            if not isinstance(shopping_results, list): return []
 
             for item in shopping_results:
                 if isinstance(item, dict) and item.get('title') and item.get('price') and item.get('link'):
                     try:
                         price_str = item.get('extracted_price') or item.get('price')
                         price_float = float(re.sub(r'[^\d.]', '', str(price_str)))
-                        
                         if price_float >= 0.50:
                             products.append(ProductResult(
-                                name=item['title'],
-                                price=price_float,
-                                store=item.get('source', 'Google'),
-                                url=item['link'],
-                                image_url=item.get('thumbnail', '')
+                                name=item['title'], price=price_float, store=item.get('source', 'Google'),
+                                url=item['link'], image_url=item.get('thumbnail', '')
                             ))
-                    except (ValueError, TypeError, KeyError):
-                        continue
+                    except (ValueError, TypeError, KeyError): continue
             
             print(f"✅ Google Shopping encontró {len(products)} resultados válidos.")
             return products
@@ -208,7 +153,7 @@ class SmartShoppingBot:
     def search_with_ai_verification(self, query: str, category: str) -> List[ProductResult]:
         search_query = f'{query} supplier' if category == 'industrial_parts' else query
         print(f"--- Iniciando búsqueda profunda ({category}): '{search_query}' ---")
-        params = {"q": search_query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "num": "20", "api_key": self.serpapi_key}
+        params = {"q": search_query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "num": "15", "api_key": self.serpapi_key}
         try:
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=45)
             response.raise_for_status()
@@ -221,13 +166,13 @@ class SmartShoppingBot:
                 for future in as_completed(future_to_item):
                     item = future_to_item[future]
                     content = future.result()
+                    # Sin verificación de IA, confiamos más en la presencia de un precio.
                     if content and content['price'] != "N/A":
-                        if _verify_is_product_page(query, content['title'], content['text'], category):
-                            try:
-                                price_float = float(content['price'])
-                                if price_float >= 0.50:
-                                    valid_results.append(ProductResult(name=content['title'], price=price_float, store=_get_clean_company_name(item), url=item.get('link'), image_url=content['image'] or item.get('thumbnail', '')))
-                            except (ValueError, TypeError): continue
+                        try:
+                            price_float = float(content['price'])
+                            if price_float >= 0.50:
+                                valid_results.append(ProductResult(name=content['title'], price=price_float, store=_get_clean_company_name(item), url=item.get('link'), image_url=content['image'] or item.get('thumbnail', '')))
+                        except (ValueError, TypeError): continue
             return valid_results
         except Exception as e:
             print(f"❌ Ocurrió un error en la búsqueda profunda: {e}"); return []
@@ -235,13 +180,10 @@ class SmartShoppingBot:
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str], List[str]]:
         errors_list = []
         text_query = query.strip() if query else None
-        
-        # El análisis de imagen todavía genera una consulta en inglés, lo cual es beneficioso.
         image_query = self.get_descriptive_query_from_image(image_content, errors_list) if image_content else None
         
         final_query = None
         if text_query and image_query:
-            # Gemini combinará el texto del usuario (en cualquier idioma) con la descripción de la imagen (en inglés).
             final_query = self._combine_text_and_image_query(text_query, image_query)
         elif text_query:
             final_query = text_query
@@ -252,8 +194,9 @@ class SmartShoppingBot:
             print("❌ No se pudo determinar una consulta válida.")
             return [], [], errors_list
         
-        category = _get_product_category(final_query, errors_list)
-        print(f"🔍 Lanzando búsqueda HÍBRIDA ({category}) para la consulta: '{final_query}'")
+        # Se establece una categoría por defecto para evitar una llamada a la API
+        category = "consumer_tech"
+        print(f"🔍 Lanzando búsqueda HÍBRIDA (Modo Ahorro, Cat: {category}) para: '{final_query}'")
         
         all_results = []
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -262,11 +205,9 @@ class SmartShoppingBot:
             all_results.extend(future_deep_search.result())
             all_results.extend(future_shopping_search.result())
 
-        suggestions = []
         if not all_results:
-            print("🤔 No se encontraron resultados. Generando sugerencias...")
-            suggestions = _get_suggestions_with_gemini(final_query, errors_list)
-            return [], suggestions, errors_list
+            print("🤔 No se encontraron resultados. Las sugerencias de IA están desactivadas en modo ahorro.")
+            return [], [], errors_list
 
         seen_urls = set()
         unique_results = []
@@ -276,8 +217,8 @@ class SmartShoppingBot:
                 seen_urls.add(product.url)
         
         unique_results.sort(key=lambda x: x.price)
-        print(f"✅ Búsqueda híbrida finalizada. {len(unique_results)} resultados únicos encontrados.")
-        return unique_results, suggestions, errors_list
+        print(f"✅ Búsqueda finalizada. {len(unique_results)} resultados únicos encontrados.")
+        return unique_results, [], errors_list
 
 # ==============================================================================
 # SECCIÓN 3: RUTAS FLASK Y EJECUCIÓN
@@ -389,7 +330,7 @@ function performSearch() {
             });
         } else {
             document.getElementById("results-title").style.display = "none";
-            if (!apiErrorsDiv.innerHTML) { // Solo muestra 'no encontrado' si no hay errores de API
+            if (!apiErrorsDiv.innerHTML) { 
                  productsGrid.innerHTML = "<p>No se encontraron resultados para tu búsqueda.</p>";
             }
         }
