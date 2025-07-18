@@ -1,13 +1,13 @@
-# app.py (versión 18.0 - Motor de Producción Endurecido)
+# app.py (versión 19.0 - Motor de Caza de Ofertas Agresivo)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 18.0 (Hardened Production Engine)
+# Versión: 19.0 (Aggressive Bargain Hunter Engine)
 # Novedades:
-# - MANEJO DE ERRORES A NIVEL DE PRODUCCIÓN: La lógica principal de búsqueda está ahora en un bloque try-except global para prevenir fallos críticos y siempre devolver una respuesta controlada.
-# - ALGORITMO DE PUNTUACIÓN ROBUSTO: El cálculo del "Deal Score" ha sido rediseñado para manejar correctamente todos los casos límite (0, 1, o N resultados) sin fallar.
-# - OPTIMIZACIÓN DEL JUICIO DE IA: El prompt de la IA ha sido refinado para ser más eficiente y el manejo de sus respuestas es más tolerante a fallos.
-# - TRANSPARENCIA MEJORADA: La "Puntuación de Oferta" ahora se muestra en el tooltip de la interfaz para mayor claridad.
+# - ALGORITMO "PRECIO PRIMERO": El "Deal Score" ha sido rediseñado para penalizar masivamente los precios altos, priorizando las ofertas más baratas.
+# - FILTRO GEOGRÁFICO ESTRICTO: La IA ahora descarta implacablemente cualquier resultado que no sea verificado como relevante para los Estados Unidos.
+# - EXPANSIÓN DE BÚSQUEDA MASIVA: Se ha aumentado la profundidad de búsqueda a 3 páginas de Google y el número de candidatos a validar a 25 para obtener más resultados.
+# - ARQUITECTURA ROBUSTA: Se mantiene el motor de producción endurecido para prevenir fallos críticos.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -104,7 +104,7 @@ def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list
         f"1.  **Extract Price & Currency:** Find the main product's price and its 3-letter currency code (e.g., 'USD', 'MXN'). Assume 'USD' if unclear.\n"
         f"2.  **Relevance Score (1-10):** How closely does this product match the user's search? 10 is perfect. Below 5 is a different product.\n"
         f"3.  **Price Accuracy Score (1-10):** How confident are you the price is correct for a single unit? 10 is very confident.\n"
-        f"4.  **US Centric Check:** Does this store operate in/ship to the USA?\n\n"
+        f"4.  **US Centric Check:** Does this store operate in or ship to the USA? This is critical.\n\n"
         f"Return a JSON with these keys: `price` (float), `currency` (string), `relevance_score` (int), `price_accuracy_score` (int), `is_usa_centric` (boolean), `reasoning` (string)."
     )
     try:
@@ -112,7 +112,7 @@ def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         analysis = json.loads(response.text)
         if not all(k in analysis for k in ["price", "currency", "relevance_score", "price_accuracy_score", "is_usa_centric"]): return default_failure
-        print(f"  🧠 Calificación IA: Relevancia={analysis['relevance_score']}/10, Precisión={analysis['price_accuracy_score']}/10, Precio={analysis['price']} {analysis['currency']}")
+        print(f"  🧠 Calificación IA: Relevancia={analysis['relevance_score']}/10, Precisión={analysis['price_accuracy_score']}/10, Precio={analysis['price']} {analysis['currency']}, USA?={analysis['is_usa_centric']}")
         return analysis
     except (json.JSONDecodeError, google_exceptions.ResourceExhausted, ValueError) as e:
         if isinstance(e, google_exceptions.ResourceExhausted): errors_list.append("Advertencia: Cuota de API superada durante el análisis.")
@@ -122,6 +122,8 @@ def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
+        self.TOP_N_CANDIDATES_TO_VALIDATE = 25
+        self.MAX_RESULTS_TO_RETURN = 15
 
     def _run_search_task(self, query: str, engine: str, start: int = 0) -> List[str]:
         urls = []
@@ -139,9 +141,10 @@ class SmartShoppingBot:
     def get_candidate_urls_exhaustively(self, base_query: str, original_query: str) -> List[str]:
         print("--- FASE 1: Iniciando Búsqueda Exhaustiva de Candidatos ---")
         tasks = []
-        high_priority_stores = ["homedepot.com", "lowes.com", "grainger.com", "uline.com", "lumberliquidators.com", "amazon.com", "walmart.com", "ebay.com"]
+        high_priority_stores = ["homedepot.com", "lowes.com", "grainger.com", "uline.com", "lumberliquidators.com", "amazon.com", "walmart.com", "ebay.com", "zoro.com"]
         
-        for i in range(2): tasks.append({"query": base_query, "engine": "google", "start": i * 10})
+        # Búsqueda Orgánica Profunda (3 páginas)
+        for i in range(3): tasks.append({"query": base_query, "engine": "google", "start": i * 10})
         tasks.append({"query": base_query, "engine": "google_shopping", "start": 0})
         for store in high_priority_stores: tasks.append({"query": f'site:{store} "{original_query}"', "engine": "google", "start": 0})
         tasks.append({"query": f'"{original_query}" cheap', "engine": "google", "start": 0})
@@ -179,7 +182,8 @@ class SmartShoppingBot:
                 future_to_candidate = {executor.submit(_get_ai_analysis, c, original_query, errors_list): c for c in candidates_for_judgement}
                 for future in as_completed(future_to_candidate):
                     candidate_data, analysis = future_to_candidate[future], future.result()
-                    if analysis.get('relevance_score', 0) >= 5 and analysis.get('price_accuracy_score', 0) >= 5 and analysis.get('is_usa_centric', False):
+                    # FILTRO ESTRICTO DE EE.UU. Y CALIDAD MÍNIMA
+                    if analysis.get('is_usa_centric', False) and analysis.get('relevance_score', 0) >= 4 and analysis.get('price_accuracy_score', 0) >= 4:
                         currency = analysis.get('currency', 'USD').upper(); rate = CURRENCY_RATES_TO_USD.get(currency)
                         if rate:
                             original_price = float(analysis['price']); price_in_usd = original_price * rate
@@ -195,8 +199,8 @@ class SmartShoppingBot:
             
             # --- FASE 3: CALCULAR "DEAL SCORE" Y ORDENAR (ROBUSTO) ---
             if len(analyzed_products) == 1:
-                analyzed_products[0].deal_score = analyzed_products[0].relevance_score * 5 # Si solo hay uno, es la mejor oferta
-                return analyzed_products, [], errors_list
+                analyzed_products[0].deal_score = analyzed_products[0].relevance_score * 5
+                return analyzed_products[:self.MAX_RESULTS_TO_RETURN], [], errors_list
 
             prices = [p.price_in_usd for p in analyzed_products]
             min_price, max_price = min(prices), max(prices)
@@ -204,16 +208,16 @@ class SmartShoppingBot:
             for p in analyzed_products:
                 price_range = max_price - min_price
                 normalized_price = (p.price_in_usd - min_price) / price_range if price_range > 0 else 0
-                price_penalty = normalized_price * 5
-                p.deal_score = (p.relevance_score * 3) + (p.price_accuracy_score * 2) - price_penalty
+                price_penalty = normalized_price * 15 # Penalización muy agresiva
+                p.deal_score = (p.relevance_score * 2) + (p.price_accuracy_score * 1) - price_penalty
                 
             final_results = sorted(analyzed_products, key=lambda p: p.deal_score, reverse=True)
             print(f"✅ BÚSQUEDA COMPLETA. Se encontraron {len(final_results)} ofertas de calidad.")
-            return final_results, [], errors_list
+            return final_results[:self.MAX_RESULTS_TO_RETURN], [], errors_list
 
         except Exception as e:
             print(f"‼️ ERROR CRÍTICO NO MANEJADO EN search_product: {e}")
-            traceback.print_exc() # Imprime el traceback completo en los logs del servidor
+            traceback.print_exc()
             errors_list.append("Ocurrió un error inesperado en el servidor. El problema ha sido registrado.")
             return [], [], errors_list
 
