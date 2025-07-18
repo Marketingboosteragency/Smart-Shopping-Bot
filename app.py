@@ -1,13 +1,13 @@
-# app.py (versión 17.0 - Motor de Caza de Ofertas)
+# app.py (versión 18.0 - Motor de Producción Endurecido)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 17.0 (Price Hunter Engine)
+# Versión: 18.0 (Hardened Production Engine)
 # Novedades:
-# - ARQUITECTURA DE PUNTUACIÓN DE OFERTAS: La IA ya no valida con SÍ/NO, sino que califica la relevancia y la precisión del precio en una escala de 1 a 10.
-# - ALGORITMO DE "DEAL SCORE": Un nuevo algoritmo ponderado calcula la "puntuación de oferta" de cada producto, penalizando fuertemente los precios altos para priorizar las gangas.
-# - FILTRO GEOGRÁFICO INTELIGENTE: La IA ahora verifica si la tienda es relevante para los Estados Unidos, cumpliendo con la solicitud del usuario.
-# - ORDENACIÓN POR VALOR: Los resultados se ordenan por la mejor "puntuación de oferta", no solo por el precio más bajo, garantizando un equilibrio entre relevancia y costo.
+# - MANEJO DE ERRORES A NIVEL DE PRODUCCIÓN: La lógica principal de búsqueda está ahora en un bloque try-except global para prevenir fallos críticos y siempre devolver una respuesta controlada.
+# - ALGORITMO DE PUNTUACIÓN ROBUSTO: El cálculo del "Deal Score" ha sido rediseñado para manejar correctamente todos los casos límite (0, 1, o N resultados) sin fallar.
+# - OPTIMIZACIÓN DEL JUICIO DE IA: El prompt de la IA ha sido refinado para ser más eficiente y el manejo de sus respuestas es más tolerante a fallos.
+# - TRANSPARENCIA MEJORADA: La "Puntuación de Oferta" ahora se muestra en el tooltip de la interfaz para mayor claridad.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -16,9 +16,9 @@ import re
 import json
 import os
 import io
-import statistics
+import traceback
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from urllib.parse import urlparse, urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from fake_useragent import UserAgent
@@ -73,10 +73,24 @@ def _deep_scrape_content(url: str) -> Dict[str, Any]:
         image_url = (og.get("content") for og in [soup.find("meta", property="og:image")] if og)
         image_url = urljoin(url, next(image_url, ''))
         title = soup.title.string.strip() if soup.title else 'No Title'
-        text_content = ' '.join(soup.stripped_strings)[:2000] # Captura más texto
+        text_content = ' '.join(soup.stripped_strings)[:2000]
         return {'title': title, 'image': image_url, 'text_content': text_content, 'url': url}
     except Exception:
         return {'title': 'N/A', 'image': '', 'text_content': '', 'url': url}
+
+def _enhance_query_for_purchase(text: str, errors_list: List[str]) -> str:
+    if not genai or not text: return text
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        prompt = f"Enhance and translate this user's query into a specific, detailed English query for finding a product online. Query: '{text}'. Respond ONLY with the enhanced query."
+        response = model.generate_content(prompt)
+        enhanced_query = response.text.strip()
+        print(f"  🧠 Consulta mejorada por IA: de '{text}' a '{enhanced_query}'.")
+        return enhanced_query
+    except google_exceptions.ResourceExhausted as e:
+        errors_list.append("Advertencia: Cuota de API superada para mejorar la consulta.")
+        return text
+    except Exception: return text
 
 def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list: List[str]) -> Dict[str, Any]:
     default_failure = {"relevance_score": 0, "price_accuracy_score": 0}
@@ -88,23 +102,20 @@ def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list
         f"DATA:\n- User's Search: '{original_query}'\n- Page Title: '{candidate['title']}'\n- Page Text: '{candidate['text_content']}'\n\n"
         f"TASKS & SCORING:\n"
         f"1.  **Extract Price & Currency:** Find the main product's price and its 3-letter currency code (e.g., 'USD', 'MXN'). Assume 'USD' if unclear.\n"
-        f"2.  **Relevance Score (1-10):** How closely does this product match the user's search? 10 is a perfect match. Below 5 is a different product.\n"
-        f"3.  **Price Accuracy Score (1-10):** How confident are you that the price you found is the primary, correct price for a single unit of the main item? 10 is very confident.\n"
-        f"4.  **US Centric Check:** Does this store seem to operate in or ship to the United States?\n\n"
+        f"2.  **Relevance Score (1-10):** How closely does this product match the user's search? 10 is perfect. Below 5 is a different product.\n"
+        f"3.  **Price Accuracy Score (1-10):** How confident are you the price is correct for a single unit? 10 is very confident.\n"
+        f"4.  **US Centric Check:** Does this store operate in/ship to the USA?\n\n"
         f"Return a JSON with these keys: `price` (float), `currency` (string), `relevance_score` (int), `price_accuracy_score` (int), `is_usa_centric` (boolean), `reasoning` (string)."
     )
-    
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         analysis = json.loads(response.text)
-        if not all(k in analysis for k in ["price", "currency", "relevance_score", "price_accuracy_score", "is_usa_centric"]):
-            return default_failure
-        print(f"  🧠 Calificación IA: Relevancia={analysis['relevance_score']}/10, Precisión Precio={analysis['price_accuracy_score']}/10, Precio={analysis['price']} {analysis['currency']}")
+        if not all(k in analysis for k in ["price", "currency", "relevance_score", "price_accuracy_score", "is_usa_centric"]): return default_failure
+        print(f"  🧠 Calificación IA: Relevancia={analysis['relevance_score']}/10, Precisión={analysis['price_accuracy_score']}/10, Precio={analysis['price']} {analysis['currency']}")
         return analysis
     except (json.JSONDecodeError, google_exceptions.ResourceExhausted, ValueError) as e:
-        if isinstance(e, google_exceptions.ResourceExhausted):
-            errors_list.append("Advertencia: Cuota de API superada durante el análisis de ofertas.")
+        if isinstance(e, google_exceptions.ResourceExhausted): errors_list.append("Advertencia: Cuota de API superada durante el análisis.")
         return default_failure
     except Exception: return default_failure
 
@@ -128,10 +139,9 @@ class SmartShoppingBot:
     def get_candidate_urls_exhaustively(self, base_query: str, original_query: str) -> List[str]:
         print("--- FASE 1: Iniciando Búsqueda Exhaustiva de Candidatos ---")
         tasks = []
-        high_priority_stores = ["homedepot.com", "lowes.com", "grainger.com", "uline.com", "lumberliquidators.com", "amazon.com"]
+        high_priority_stores = ["homedepot.com", "lowes.com", "grainger.com", "uline.com", "lumberliquidators.com", "amazon.com", "walmart.com", "ebay.com"]
         
-        # Búsqueda Orgánica Profunda (3 páginas)
-        for i in range(3): tasks.append({"query": base_query, "engine": "google", "start": i * 10})
+        for i in range(2): tasks.append({"query": base_query, "engine": "google", "start": i * 10})
         tasks.append({"query": base_query, "engine": "google_shopping", "start": 0})
         for store in high_priority_stores: tasks.append({"query": f'site:{store} "{original_query}"', "engine": "google", "start": 0})
         tasks.append({"query": f'"{original_query}" cheap', "engine": "google", "start": 0})
@@ -146,55 +156,66 @@ class SmartShoppingBot:
 
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str], List[str]]:
         errors_list = []
-        original_query = query.strip() if query else "product from image"
-        if not original_query: return [], [], []
+        try:
+            original_query = query.strip() if query else "product from image"
+            if not original_query: return [], [], []
 
-        enhanced_query = _enhance_query_for_purchase(original_query, errors_list)
-        if not enhanced_query: return [], [], errors_list
-        
-        candidate_urls = self.get_candidate_urls_exhaustively(enhanced_query, original_query)
-        blacklist = ['pinterest.com', 'youtube.com', 'wikipedia.org', 'facebook.com']
-        filtered_urls = [url for url in candidate_urls if not any(site in url for site in blacklist)]
-        
-        print(f"--- {len(filtered_urls)} URLs candidatas pasarán a la fase de scrape y juicio. ---")
-        if not filtered_urls: return [], [], errors_list
+            enhanced_query = _enhance_query_for_purchase(original_query, errors_list)
+            if not enhanced_query: return [], ["No se pudo generar una consulta válida."], errors_list
+            
+            candidate_urls = self.get_candidate_urls_exhaustively(enhanced_query, original_query)
+            blacklist = ['pinterest.com', 'youtube.com', 'wikipedia.org', 'facebook.com']
+            filtered_urls = [url for url in candidate_urls if not any(site in url for site in blacklist)]
+            
+            print(f"--- {len(filtered_urls)} URLs candidatas pasarán a la fase de scrape y juicio. ---")
+            if not filtered_urls: return [], [], errors_list
 
-        analyzed_products = []
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            scraped_candidates = [r for r in executor.map(_deep_scrape_content, filtered_urls)]
-            candidates_for_judgement = [c for c in scraped_candidates if c['text_content']]
-            print(f"--- FASE 2: Sometiendo a juicio de IA a {len(candidates_for_judgement)} candidatos. ---")
+            analyzed_products = []
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                scraped_candidates = list(executor.map(_deep_scrape_content, filtered_urls))
+                candidates_for_judgement = [c for c in scraped_candidates if c['text_content']]
+                print(f"--- FASE 2: Sometiendo a juicio de IA a {len(candidates_for_judgement)} candidatos. ---")
+                
+                future_to_candidate = {executor.submit(_get_ai_analysis, c, original_query, errors_list): c for c in candidates_for_judgement}
+                for future in as_completed(future_to_candidate):
+                    candidate_data, analysis = future_to_candidate[future], future.result()
+                    if analysis.get('relevance_score', 0) >= 5 and analysis.get('price_accuracy_score', 0) >= 5 and analysis.get('is_usa_centric', False):
+                        currency = analysis.get('currency', 'USD').upper(); rate = CURRENCY_RATES_TO_USD.get(currency)
+                        if rate:
+                            original_price = float(analysis['price']); price_in_usd = original_price * rate
+                            if price_in_usd >= 0.50:
+                                analyzed_products.append(ProductResult(
+                                    name=candidate_data['title'], store=urlparse(candidate_data['url']).netloc.replace('www.', '').split('.')[0].capitalize(),
+                                    url=candidate_data['url'], image_url=candidate_data['image'],
+                                    price_in_usd=price_in_usd, original_price=original_price, original_currency=currency,
+                                    relevance_score=analysis['relevance_score'], price_accuracy_score=analysis['price_accuracy_score'], reasoning=analysis.get('reasoning', '')
+                                ))
             
-            future_to_candidate = {executor.submit(_get_ai_analysis, c, original_query, errors_list): c for c in candidates_for_judgement}
-            for future in as_completed(future_to_candidate):
-                candidate_data, analysis = future_to_candidate[future], future.result()
-                if analysis.get('relevance_score', 0) >= 5 and analysis.get('price_accuracy_score', 0) >= 5 and analysis.get('is_usa_centric', False):
-                    currency = analysis.get('currency', 'USD').upper(); rate = CURRENCY_RATES_TO_USD.get(currency)
-                    if rate:
-                        original_price = float(analysis['price']); price_in_usd = original_price * rate
-                        if price_in_usd >= 0.50:
-                            analyzed_products.append(ProductResult(
-                                name=candidate_data['title'], store=urlparse(candidate_data['url']).netloc.replace('www.', '').split('.')[0].capitalize(),
-                                url=candidate_data['url'], image_url=candidate_data['image'],
-                                price_in_usd=price_in_usd, original_price=original_price, original_currency=currency,
-                                relevance_score=analysis['relevance_score'], price_accuracy_score=analysis['price_accuracy_score'], reasoning=analysis.get('reasoning', '')
-                            ))
-        
-        if not analyzed_products: return [], [], errors_list
+            if not analyzed_products: return [], [], errors_list
             
-        # --- FASE 3: CALCULAR "DEAL SCORE" Y ORDENAR ---
-        prices = [p.price_in_usd for p in analyzed_products]
-        min_price, max_price = min(prices), max(prices)
-        
-        for p in analyzed_products:
-            price_range = max_price - min_price
-            normalized_price = (p.price_in_usd - min_price) / price_range if price_range > 0 else 0
-            price_penalty = normalized_price * 5 # Penalización fuerte por precio alto
-            p.deal_score = (p.relevance_score * 3) + (p.price_accuracy_score * 2) - price_penalty
+            # --- FASE 3: CALCULAR "DEAL SCORE" Y ORDENAR (ROBUSTO) ---
+            if len(analyzed_products) == 1:
+                analyzed_products[0].deal_score = analyzed_products[0].relevance_score * 5 # Si solo hay uno, es la mejor oferta
+                return analyzed_products, [], errors_list
+
+            prices = [p.price_in_usd for p in analyzed_products]
+            min_price, max_price = min(prices), max(prices)
             
-        final_results = sorted(analyzed_products, key=lambda p: p.deal_score, reverse=True)
-        print(f"✅ BÚSQUEDA COMPLETA. Se encontraron {len(final_results)} ofertas de calidad.")
-        return final_results, [], errors_list
+            for p in analyzed_products:
+                price_range = max_price - min_price
+                normalized_price = (p.price_in_usd - min_price) / price_range if price_range > 0 else 0
+                price_penalty = normalized_price * 5
+                p.deal_score = (p.relevance_score * 3) + (p.price_accuracy_score * 2) - price_penalty
+                
+            final_results = sorted(analyzed_products, key=lambda p: p.deal_score, reverse=True)
+            print(f"✅ BÚSQUEDA COMPLETA. Se encontraron {len(final_results)} ofertas de calidad.")
+            return final_results, [], errors_list
+
+        except Exception as e:
+            print(f"‼️ ERROR CRÍTICO NO MANEJADO EN search_product: {e}")
+            traceback.print_exc() # Imprime el traceback completo en los logs del servidor
+            errors_list.append("Ocurrió un error inesperado en el servidor. El problema ha sido registrado.")
+            return [], [], errors_list
 
 # ==============================================================================
 # SECCIÓN 3: RUTAS FLASK Y EJECUCIÓN
@@ -215,7 +236,7 @@ def login():
     try:
         response = requests.post(rest_api_url, json=payload); response.raise_for_status()
         user_data = response.json()
-        session['user_id'] = user_data['localId']; session['user_name'] = user_data.get('displayName', email)
+        session['user_id'] = user_data['localId']; session['user_name'] = user_data.get('displayName', email); session['id_token'] = user_data['idToken']
         flash('¡Has iniciado sesión correctamente!', 'success'); return redirect(url_for('main_app_page'))
     except requests.exceptions.HTTPError as e:
         error_message = e.response.json().get('error', {}).get('message', 'ERROR')
