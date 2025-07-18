@@ -1,13 +1,12 @@
-# app.py (versión 16.1 - Motor Ultra-Fiable de Google Shopping - Completo)
+# app.py (versión 16.2 - Traducción Automática y Búsqueda Fiable)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 16.1 (Ultra-Reliable Shopping Engine - Full Code)
+# Versión: 16.2 (Automatic Translation & Reliable Search)
 # Novedades:
-# - Se elimina por completo el scraping para máxima velocidad y fiabilidad.
-# - El motor de búsqueda se basa 100% en la API de Google Shopping.
-# - Garantiza resultados precisos, baratos y geo-localizados para cualquier producto.
-# - Código completo y verificado, listo para copiar y pegar.
+# - Se añade una capa de traducción automática con IA para las consultas de búsqueda.
+# - Se asegura que todas las búsquedas enviadas a SerpApi estén en inglés para máxima compatibilidad.
+# - Código simplificado y enfocado en la fiabilidad de Google Shopping.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -16,7 +15,7 @@ import re
 import json
 import os
 import io
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from dataclasses import dataclass
 from flask import Flask, request, render_template_string, jsonify, session, redirect, url_for, flash
 from PIL import Image
@@ -50,106 +49,95 @@ if genai and GEMINI_API_KEY:
         genai = None
 
 # ==============================================================================
-# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (SIMPLIFICADA Y ROBUSTA)
+# SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (CON TRADUCCIÓN)
 # ==============================================================================
 
 @dataclass
 class ProductResult:
-    name: str
-    price: float
-    store: str
-    url: str
-    image_url: str = ""
+    name: str; price: float; store: str; url: str; image_url: str = ""
 
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
 
+    def _translate_query_to_english(self, query: str) -> str:
+        if not genai: return query # Si no hay IA, usar la consulta original
+        print(f"  🌐 Traduciendo consulta al inglés: '{query}'")
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash-latest')
+            prompt = f"Translate the following product search query to English. Respond ONLY with the translated query. Query: '{query}'"
+            response = model.generate_content(prompt)
+            translated_query = response.text.strip()
+            print(f"  ✅ Consulta traducida: '{translated_query}'")
+            return translated_query
+        except Exception as e:
+            print(f"  ❌ Fallo en la traducción: {e}. Usando consulta original.")
+            return query
+
     def get_descriptive_query_from_image(self, image_content: bytes) -> Optional[str]:
-        if not genai:
-            print("  ❌ Análisis con Gemini Vision saltado: Modelo no configurado.")
-            return None
+        if not genai: print("  ❌ Análisis con Gemini Vision saltado."); return None
         print("  🧠 Analizando imagen con Gemini Vision...")
         try:
             image_pil = Image.open(io.BytesIO(image_content))
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            prompt = """You are an expert in identifying products. Analyze the image and generate a specific, effective search query in English to find this product for sale online. Respond ONLY with the search query."""
+            prompt = """You are an expert in identifying products. Analyze the image and generate a specific, effective search query in English. Respond ONLY with the search query."""
             response = model.generate_content([prompt, image_pil])
             query = response.text.strip().replace("*", "")
             print(f"  ✅ Consulta experta generada por Gemini Vision: '{query}'")
             return query
         except Exception as e:
-            print(f"  ❌ Fallo CRÍTICO en análisis con Gemini Vision: {e}")
-            return None
+            print(f"  ❌ Fallo CRÍTICO en análisis con Gemini Vision: {e}"); return None
 
     def _combine_text_and_image_query(self, text_query: str, image_query: str) -> str:
         return f"{text_query} {image_query}"
 
     def search_product(self, query: str = None, image_content: bytes = None) -> List[ProductResult]:
-        text_query = query.strip() if query else None
-        image_query = self.get_descriptive_query_from_image(image_content) if image_content else None
-        
-        final_query = None
-        if text_query and image_query:
-            final_query = self._combine_text_and_image_query(text_query, image_query)
-        elif text_query:
-            final_query = text_query
-        elif image_query:
-            final_query = image_query
+        initial_query = None
+        if query and image_content:
+            image_query = self.get_descriptive_query_from_image(image_content)
+            if image_query: initial_query = self._combine_text_and_image_query(query.strip(), image_query)
+        elif query:
+            initial_query = query.strip()
+        elif image_content:
+            initial_query = self.get_descriptive_query_from_image(image_content)
 
-        if not final_query:
-            print("❌ No se pudo determinar una consulta válida.")
-            return []
+        if not initial_query:
+            print("❌ No se pudo determinar una consulta válida."); return []
+
+        # GÉNESIS: Traducir la consulta final a inglés antes de buscar
+        final_query = self._translate_query_to_english(initial_query)
 
         print(f"🚀 Lanzando búsqueda en Google Shopping para: '{final_query}'")
         
-        params = {
-            "q": final_query,
-            "engine": "google_shopping",
-            "location": "United States",
-            "gl": "us",
-            "hl": "en",
-            "num": "100",  # Pedimos hasta 100 resultados para tener una buena selección
-            "api_key": self.serpapi_key
-        }
+        params = {"q": final_query, "engine": "google_shopping", "location": "United States", "gl": "us", "hl": "en", "num": "100", "api_key": self.serpapi_key}
         
         try:
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=30)
             response.raise_for_status()
-            
-            products = []
-            shopping_results = response.json().get('shopping_results', [])
+            data = response.json()
+            shopping_results = data.get('shopping_results', [])
 
             if not shopping_results:
-                 print(f"⚠️ SerpApi devolvió una respuesta válida pero sin 'shopping_results'. Respuesta: {response.json()}")
+                print("⚠️ SerpApi devolvió una respuesta válida pero sin 'shopping_results'.")
+                print(f"   Respuesta completa de SerpApi: {json.dumps(data, indent=2)}")
 
+            products = []
             for item in shopping_results:
                 if all(k in item for k in ['price', 'title', 'link', 'source']):
                     try:
                         price_str = item.get('extracted_price', item.get('price', ''))
                         price_float = float(re.sub(r'[^\d.]', '', str(price_str)))
-                        
                         if price_float > 0:
-                             products.append(ProductResult(
-                                name=item['title'],
-                                price=price_float,
-                                store=item['source'],
-                                url=item['link'],
-                                image_url=item.get('thumbnail', '')
-                            ))
-                    except (ValueError, TypeError):
-                        continue
+                             products.append(ProductResult(name=item['title'], price=price_float, store=item['source'], url=item['link'], image_url=item.get('thumbnail', '')))
+                    except (ValueError, TypeError): continue
             
             products.sort(key=lambda x: x.price)
-            print(f"✅ Búsqueda finalizada. Se encontraron {len(products)} resultados válidos en Google Shopping.")
+            print(f"✅ Búsqueda finalizada. Se encontraron {len(products)} resultados válidos.")
             return products
-
         except requests.exceptions.HTTPError as e:
-            print(f"❌ Ocurrió un error HTTP en la búsqueda: {e.response.status_code} - {e.response.text}")
-            return []
+            print(f"❌ Ocurrió un error HTTP en la búsqueda: {e.response.status_code} - {e.response.text}"); return []
         except Exception as e:
-            print(f"❌ Ocurrió un error general en la búsqueda: {e}")
-            return []
+            print(f"❌ Ocurrió un error general en la búsqueda: {e}"); return []
 
 # ==============================================================================
 # SECCIÓN 3: RUTAS FLASK Y EJECUCIÓN
