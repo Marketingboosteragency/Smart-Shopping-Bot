@@ -1,13 +1,13 @@
-# app.py (versión 15.2 - Experto Dual con Recomendaciones - Completo)
+# app.py (versión 16.1 - Búsqueda Multi-Tienda con Recomendaciones - Completo)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 15.2 (Dual Expert with Compatibility Engine - Full Code)
+# Versión: 16.1 (Multi-Store & Compatibility Engine - Full Code)
 # Novedades:
-# - Código completo y verificado, listo para copiar y pegar.
-# - El bot es un experto dual que adapta su estrategia a piezas industriales y tecnología.
+# - Búsqueda expandida a Google Shopping, eBay y Walmart en paralelo.
 # - Nuevo motor de IA que busca y recomienda piezas de reemplazo compatibles.
-# - Filtros estrictos de precio y geo-localización para resultados de máxima calidad.
+# - Interfaz actualizada para mostrar resultados directos y recomendados.
+# - Código completo y verificado, listo para copiar y pegar.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -15,8 +15,6 @@ import requests
 import re
 import json
 import os
-import time
-import statistics
 import io
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
@@ -28,12 +26,6 @@ from flask import Flask, request, render_template_string, jsonify, session, redi
 from PIL import Image
 
 # --- IMPORTS DE APIS DE GOOGLE ---
-try:
-    from google.cloud import vision
-    print("✅ Módulo de Google Cloud Vision importado.")
-except ImportError:
-    print("⚠️ AVISO: 'google-cloud-vision' no está instalado.")
-    vision = None
 try:
     import google.generativeai as genai
     print("✅ Módulo de Google Generative AI (Gemini) importado.")
@@ -50,10 +42,9 @@ app = Flask(__name__)
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
 FIREBASE_WEB_API_KEY = os.environ.get("FIREBASE_WEB_API_KEY")
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-GOOGLE_CREDENTIALS_JSON_STR = os.environ.get('GOOGLE_CREDENTIALS_JSON')
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'una-clave-secreta-muy-fuerte')
 
-# Configuración de APIs
+# Configuración de Gemini
 if genai and GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
@@ -62,63 +53,19 @@ if genai and GEMINI_API_KEY:
         print(f"❌ ERROR al configurar API de Gemini: {e}")
         genai = None
 
-if GOOGLE_CREDENTIALS_JSON_STR and vision:
-    try:
-        google_creds_info = json.loads(GOOGLE_CREDENTIALS_JSON_STR)
-        with open('/tmp/google-credentials.json', 'w') as f:
-            json.dump(google_creds_info, f)
-        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = '/tmp/google-credentials.json'
-        print("✅ Credenciales de Google Vision cargadas.")
-    except Exception as e:
-        print(f"❌ ERROR al cargar credenciales de Google Vision: {e}")
-
 # ==============================================================================
 # SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT (CON RECOMENDACIONES)
 # ==============================================================================
-
-def _deep_scrape_content(url: str) -> Dict[str, Any]:
-    headers = {'User-Agent': UserAgent().random, 'Accept-Language': 'en-US,en;q=0.9', 'Referer': 'https://www.google.com/'}
-    try:
-        response = requests.get(url, headers=headers, timeout=12)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
-        price_text = "N/A"
-        price_selectors = ['[class*="price"]', '[id*="price"]', '[class*="Price"]', '[id*="Price"]']
-        for selector in price_selectors:
-            price_tag = soup.select_one(selector)
-            if price_tag:
-                match = re.search(r'\d{1,3}(?:,?\d{3})*(?:\.\d{2})?', price_tag.get_text())
-                if match: price_text = match.group(0).replace(',', ''); break
-        image_url = ""
-        og_image = soup.find("meta", property="og:image")
-        if og_image and og_image.get("content"): image_url = urljoin(url, og_image["content"])
-        title = soup.title.string.strip() if soup.title else 'Sin título'
-        text_content = ' '.join(soup.stripped_strings)[:1500]
-        return {'title': title, 'text': text_content, 'price': price_text, 'image': image_url}
-    except Exception:
-        return {'title': 'N/A', 'text': '', 'price': 'N/A', 'image': ''}
 
 def _get_product_category(query: str) -> str:
     if not genai: return "consumer_tech"
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = (f"Classify the following product search query. Is it for 'industrial_parts' (highly specialized machinery, unique car engine parts, complex components) or 'consumer_tech' (electronics, tools, items also sold to the general public like tape or screws). "
-                  f"Query: '{query}'. "
-                  "If it could be both (like tape), default to 'consumer_tech'. Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
+        prompt = (f"Classify the following product search query. Is it for 'industrial_parts' (machinery, car parts, tools) or 'consumer_tech' (electronics, gadgets, general items like tape)? Query: '{query}'. If it could be both, default to 'consumer_tech'. Respond ONLY with 'industrial_parts' or 'consumer_tech'.")
         response = model.generate_content(prompt)
         category = response.text.strip()
         return category if category in ["industrial_parts", "consumer_tech"] else "consumer_tech"
-    except Exception:
-        return "consumer_tech"
-
-def _verify_is_product_page(query: str, page_title: str, page_content: str, category: str) -> bool:
-    if not genai: return True
-    prompt_template = (f"You are a verification analyst. User search: '{query}'. Page title: '{page_title}'. Is this a retail page for the main product, not an accessory or article? Answer YES or NO.")
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        response = model.generate_content(prompt_template)
-        return "YES" in response.text.strip().upper()
-    except Exception: return False
+    except Exception: return "consumer_tech"
 
 def _get_suggestions_with_gemini(query: str) -> List[str]:
     if not genai: return []
@@ -130,47 +77,32 @@ def _get_suggestions_with_gemini(query: str) -> List[str]:
         return json.loads(cleaned_response)
     except Exception: return []
 
-def _get_clean_company_name(item: Dict) -> str:
-    try:
-        if source := item.get('source'): return source
-        return urlparse(item.get('link', '')).netloc.replace('www.', '').split('.')[0].capitalize()
-    except: return "Tienda"
-
-def _is_usa_domain(url: str) -> bool:
-    try:
-        domain = urlparse(url).netloc
-        allowed_tlds = ['.com', '.net', '.org', '.us', '.gov', '.edu', '.io', '.co']
-        excluded_country_tlds = ['.mx', '.ca', '.uk', '.de', '.fr', '.cn', '.jp', '.in']
-        if any(domain.endswith(tld) for tld in excluded_country_tlds): return False
-        return any(domain.endswith(tld) for tld in allowed_tlds)
-    except: return False
-
 @dataclass
 class ProductResult:
-    name: str; price: float; store: str; url: str; image_url: str = ""; is_compatible: bool = False
+    name: str
+    price: float
+    store: str
+    url: str
+    image_url: str = ""
+    is_compatible: bool = False
 
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
-        self.vision_client = None
-        if vision and GOOGLE_CREDENTIALS_JSON_STR:
-            try:
-                self.vision_client = vision.ImageAnnotatorClient()
-                print("✅ Cliente de Google Cloud Vision inicializado.")
-            except Exception as e:
-                print(f"❌ ERROR CRÍTICO EN VISION INIT: {e}")
 
-    def get_query_from_image(self, image_content: bytes) -> Optional[str]:
-        if not self.vision_client: print("  ❌ Análisis con Vision saltado."); return None
-        print("  🧠 Analizando imagen con Google Cloud Vision...")
+    def get_descriptive_query_from_image(self, image_content: bytes) -> Optional[str]:
+        if not genai: print("  ❌ Análisis con Gemini Vision saltado."); return None
+        print("  🧠 Analizando imagen con Gemini Vision...")
         try:
-            image_for_api = vision.Image(content=image_content)
-            response = self.vision_client.web_detection(image=image_for_api)
-            if response.web_detection and response.web_detection.best_guess_labels:
-                return response.web_detection.best_guess_labels[0].label
-            return None
+            image_pil = Image.open(io.BytesIO(image_content))
+            model = genai.GenerativeModel('gemini-1.5-flash-latest')
+            prompt = """You are an expert product identifier. Analyze the image and generate a specific search query in English. Respond ONLY with the search query."""
+            response = model.generate_content([prompt, image_pil])
+            query = response.text.strip().replace("*", "")
+            print(f"  ✅ Consulta experta generada por Gemini Vision: '{query}'")
+            return query
         except Exception as e:
-            print(f"  ❌ Fallo en análisis de imagen: {e}"); return None
+            print(f"  ❌ Fallo CRÍTICO en análisis con Gemini Vision: {e}"); return None
 
     def _combine_text_and_image_query(self, text_query: str, image_query: str) -> str:
         if not genai: return f"{text_query} {image_query}"
@@ -180,88 +112,77 @@ class SmartShoppingBot:
             response = model.generate_content(prompt)
             return response.text.strip()
         except Exception: return f"{text_query} {image_query}"
-    
-    def find_compatible_parts(self, initial_results: List[ProductResult]) -> List[ProductResult]:
-        if not genai or not initial_results: return []
-        base_product = sorted(initial_results, key=lambda x: x.price)[0]
+
+    def search_specific_engine(self, engine: str, query: str) -> List[ProductResult]:
+        print(f"--- Iniciando búsqueda en {engine.replace('_', ' ').title()} para: '{query}' ---")
+        params = {"api_key": self.serpapi_key, "output": "json"}
+        if engine == "google_shopping":
+            params.update({"engine": "google_shopping", "q": query, "location": "United States", "gl": "us", "hl": "en", "num": "100"})
+        elif engine == "ebay_shopping":
+            params.update({"engine": "ebay_shopping", "_nkw": query})
+        elif engine == "walmart":
+            params.update({"engine": "walmart", "query": query})
+        else:
+            return []
+
+        try:
+            response = requests.get("https://serpapi.com/search.json", params=params, timeout=25)
+            response.raise_for_status()
+            data = response.json()
+            
+            results_key = 'shopping_results' if engine == 'google_shopping' else 'organic_results'
+            initial_results = data.get(results_key, [])
+            
+            products = []
+            for item in initial_results:
+                try:
+                    price_str = str(item.get('price', {}).get('raw') or item.get('extracted_price') or item.get('primary_offer', {}).get('offer_price') or item.get('price'))
+                    price_float = float(re.search(r'[\d\.]+', price_str).group(0))
+                    
+                    if price_float >= 0.49 and 'title' in item and 'link' in item:
+                        products.append(ProductResult(
+                            name=item['title'],
+                            price=price_float,
+                            store=item.get('source', engine.split('_')[0].capitalize()),
+                            url=item['link'],
+                            image_url=item.get('thumbnail', item.get('image'))
+                        ))
+                except (AttributeError, ValueError, TypeError):
+                    continue
+            print(f"✅ {engine.replace('_', ' ').title()} encontró {len(products)} resultados válidos.")
+            return products
+        except Exception as e:
+            print(f"❌ Ocurrió un error en la búsqueda de {engine}: {e}"); return []
+            
+    def find_compatible_parts(self, base_product: ProductResult) -> List[ProductResult]:
+        if not genai: return []
         print(f"🧬 Iniciando búsqueda de piezas compatibles basada en: '{base_product.name}'")
         try:
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            base_content = _deep_scrape_content(base_product.url)
-            base_description = base_content['text'] if base_content and base_content['text'] else base_product.name
-
-            prompt = (f"You are a mechanical engineer and parts expert. A user found this product: '{base_product.name}'. "
-                      f"The product description is: '{base_description[:1000]}'. "
-                      "Based on this, generate 2 highly specific search queries to find compatible parts or direct replacements from other brands. "
-                      "Focus on part numbers, dimensions, and technical specifications (e.g., 'M8x1.25 bolt', 'oil filter replacement for #12345'). "
+            prompt = (f"You are a mechanical engineer. A user found this part: '{base_product.name}'. "
+                      "Generate 2 highly specific search queries for compatible parts or direct replacements from other brands. "
+                      "Focus on part numbers, dimensions, or technical specifications (e.g., 'M8x1.25 bolt', 'oil filter replacement for #12345'). "
                       "Respond with a JSON list of strings, like [\"query 1\", \"query 2\"].")
             
             response = model.generate_content(prompt)
             cleaned_response = response.text.strip().replace("```json", "").replace("```", "")
             compatible_queries = json.loads(cleaned_response)
-            print(f"  🤖 Consultas de compatibilidad generadas por IA: {compatible_queries}")
+            print(f"  🤖 Consultas de compatibilidad generadas: {compatible_queries}")
             
             compatible_results = []
-            for query in compatible_queries:
-                results = self.search_google_shopping(query)
-                for res in results: res.is_compatible = True
-                compatible_results.extend(results)
-            
+            with ThreadPoolExecutor(max_workers=len(compatible_queries)) as executor:
+                future_to_query = {executor.submit(self.search_specific_engine, "google_shopping", q): q for q in compatible_queries}
+                for future in as_completed(future_to_query):
+                    results = future.result()
+                    for res in results: res.is_compatible = True
+                    compatible_results.extend(results)
             return compatible_results
         except Exception as e:
-            print(f"  ❌ Error en el motor de recomendación: {e}"); return []
-
-    def search_google_shopping(self, query: str) -> List[ProductResult]:
-        print(f"--- Iniciando búsqueda en Google Shopping para: '{query}' ---")
-        params = {"q": query, "engine": "google_shopping", "location": "United States", "gl": "us", "hl": "en", "num": "100", "api_key": self.serpapi_key}
-        try:
-            response = requests.get("https://serpapi.com/search.json", params=params, timeout=25)
-            response.raise_for_status()
-            products = []
-            for item in response.json().get('shopping_results', []):
-                if 'price' in item and 'title' in item and 'link' in item:
-                    try:
-                        price_str = item.get('extracted_price', item['price'])
-                        price_float = float(re.sub(r'[^\d.]', '', str(price_str)))
-                        if price_float >= 0.49 and _is_usa_domain(item['link']):
-                            products.append(ProductResult(name=item['title'], price=price_float, store=item.get('source', 'Google Shopping'), url=item['link'], image_url=item.get('thumbnail', '')))
-                    except (ValueError, TypeError): continue
-            print(f"✅ Google Shopping encontró {len(products)} resultados válidos.")
-            return products
-        except Exception as e:
-            print(f"❌ Ocurrió un error en Google Shopping: {e}"); return []
-
-    def search_with_ai_verification(self, query: str, category: str) -> List[ProductResult]:
-        search_query = f'{query} supplier USA'
-        print(f"--- Iniciando búsqueda profunda (Industrial): '{search_query}' ---")
-        params = {"q": search_query, "engine": "google", "location": "United States", "gl": "us", "hl": "en", "num": "20", "api_key": self.serpapi_key}
-        try:
-            response = requests.get("https://serpapi.com/search.json", params=params, timeout=45)
-            response.raise_for_status()
-            initial_results = response.json().get('organic_results', [])
-            usa_results = [item for item in initial_results if _is_usa_domain(item.get('link', ''))]
-            blacklist = ['alibaba.com', 'aliexpress.com', 'made-in-china.com', 'amazon.com', 'walmart.com', 'ebay.com']
-            filtered_results = [item for item in usa_results if not any(site in item.get('link', '') for site in blacklist)]
-            valid_results = []
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                future_to_item = {executor.submit(_deep_scrape_content, item.get('link')): item for item in filtered_results if item.get('link')}
-                for future in as_completed(future_to_item):
-                    item = future_to_item[future]
-                    content = future.result()
-                    if content and content['price'] != "N/A":
-                        if _verify_is_product_page(query, content['title'], content['text'], category):
-                            try:
-                                price_float = float(content['price'])
-                                if price_float >= 0.49:
-                                    valid_results.append(ProductResult(name=content['title'], price=price_float, store=_get_clean_company_name(item), url=item.get('link'), image_url=content['image'] or item.get('thumbnail', '')))
-                            except (ValueError, TypeError): continue
-            return valid_results
-        except Exception as e:
-            print(f"❌ Ocurrió un error en la búsqueda profunda: {e}"); return []
+            print(f"  ❌ Error en motor de recomendación: {e}"); return []
 
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str]]:
         text_query = query.strip() if query else None
-        image_query = self.get_query_from_image(image_content) if image_content else None
+        image_query = self.get_descriptive_query_from_image(image_content) if image_content else None
         final_query = None
         if text_query and image_query: final_query = self._combine_text_and_image_query(text_query, image_query)
         elif text_query: final_query = text_query
@@ -269,34 +190,43 @@ class SmartShoppingBot:
         if not final_query: print("❌ No se pudo determinar una consulta válida."); return [], []
         
         category = _get_product_category(final_query)
-        print(f"🔍 Lanzando búsqueda HÍBRIDA (Shopping First - {category}) para: '{final_query}'")
+        print(f"🔍 Lanzando búsqueda MULTI-TIENDA ({category}) para: '{final_query}'")
         
-        initial_shopping_results = self.search_google_shopping(final_query)
-        initial_deep_results = []
-        if category == 'industrial_parts':
-            initial_deep_results = self.search_with_ai_verification(final_query, category)
+        all_results = []
+        search_engines = ['google_shopping', 'ebay_shopping', 'walmart']
         
-        all_initial_results = initial_shopping_results + initial_deep_results
+        with ThreadPoolExecutor(max_workers=len(search_engines)) as executor:
+            future_searches = [executor.submit(self.search_specific_engine, engine, final_query) for engine in search_engines]
+            for future in as_completed(future_searches):
+                all_results.extend(future.result())
+
+        seen_urls = set()
+        initial_unique_results = []
+        for product in sorted(all_results, key=lambda x: x.price):
+            if product.url not in seen_urls:
+                initial_unique_results.append(product)
+                seen_urls.add(product.url)
         
         compatible_results = []
-        if len(all_initial_results) < 5 and category == 'industrial_parts' and all_initial_results:
-            compatible_results = self.find_compatible_parts(all_initial_results)
+        if len(initial_unique_results) < 5 and category == 'industrial_parts' and initial_unique_results:
+            compatible_results = self.find_compatible_parts(initial_unique_results[0])
 
-        final_results = all_initial_results + compatible_results
+        final_results = initial_unique_results + compatible_results
         
         if not final_results:
             print("🤔 No se encontraron resultados. Generando sugerencias..."); return [], _get_suggestions_with_gemini(final_query)
 
-        seen_urls = set()
-        unique_results = []
+        final_seen_urls = set()
+        final_unique_results = []
         for product in final_results:
-            if product.url not in seen_urls:
-                unique_results.append(product)
-                seen_urls.add(product.url)
+            if product.url not in final_seen_urls:
+                final_unique_results.append(product)
+                final_seen_urls.add(product.url)
         
-        unique_results.sort(key=lambda x: x.price)
-        print(f"✅ Búsqueda finalizada. Se encontraron {len(unique_results)} resultados totales (directos y compatibles).")
-        return unique_results, []
+        final_unique_results.sort(key=lambda x: (x.is_compatible, x.price))
+        print(f"✅ Búsqueda finalizada. Se encontraron {len(final_unique_results)} resultados totales.")
+        return final_unique_results, []
+
 
 # ==============================================================================
 # SECCIÓN 3: RUTAS FLASK Y EJECUCIÓN
@@ -378,8 +308,8 @@ function performSearch() {
                 html += `<div class="product-card"><div class="product-image"><img src="${product.image_url || 'https://via.placeholder.com/300'}" alt="${product.name}" onerror="this.onerror=null;this.src='https://via.placeholder.com/300';"></div><div class="product-info"><div class="product-title">${product.name}</div><div class="price-store-wrapper"><div class="current-price">$${product.price.toFixed(2)}</div><div class="store-link"><a href="${product.url}" target="_blank">Ver en ${product.store}</a></div></div></div></div>`;
             });
         }
-        if(html) {
-             productsGrid.innerHTML = html;
+        if (html) {
+            productsGrid.innerHTML = html;
         } else if (data.suggestions && data.suggestions.length > 0) {
             document.getElementById('results-title').textContent = "Resultados no encontrados";
             let suggestionsHTML = '<h3>No encontramos resultados. ¿Quizás quisiste decir...?</h3>';
@@ -387,7 +317,10 @@ function performSearch() {
             suggestionsDiv.innerHTML = suggestionsHTML;
             document.querySelectorAll('.suggestion-btn').forEach(button => {
                 button.addEventListener('click', () => {
-                    queryInput.value = button.textContent, imageInput.value = "", document.getElementById("image-preview-container").style.display = "none", performSearch();
+                    queryInput.value = button.textContent;
+                    imageInput.value = "";
+                    document.getElementById("image-preview-container").style.display = "none";
+                    performSearch();
                 });
             });
         } else {
@@ -396,7 +329,10 @@ function performSearch() {
         }
         resultsSection.style.display = "block";
     }).catch(error => {
-        console.error("Error:", error), loadingDiv.style.display = "none", productsGrid.innerHTML = "<p>Ocurrió un error durante la búsqueda. Por favor, intenta de nuevo.</p>", resultsSection.style.display = "block";
+        console.error("Error:", error);
+        loadingDiv.style.display = "none";
+        productsGrid.innerHTML = "<p>Ocurrió un error durante la búsqueda. Por favor, intenta de nuevo.</p>";
+        resultsSection.style.display = "block";
     });
 }
 searchForm.addEventListener("submit", function(e) { e.preventDefault(), performSearch(); });
