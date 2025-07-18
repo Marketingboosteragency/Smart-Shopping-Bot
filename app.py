@@ -1,51 +1,20 @@
-# app.py (versión 24.1 - MODO DE DIAGNÓSTICO)
+# app.py (versión 25.0 - Motor de Búsqueda Avanzado por Oleadas)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 24.1 (Modo de Diagnóstico para Render)
+# Versión: 25.0 (Advanced Wave-Based Search Engine)
 # Novedades:
-# - Se añaden prints de diagnóstico para verificar las variables de entorno en los logs de Render.
+# - BÚSQUEDA POR OLEADAS: Se implementa una estrategia de búsqueda en cascada con múltiples consultas, desde alta precisión hasta búsqueda en tiendas de nicho.
+# - ANÁLISIS DE IA MEJORADO: El prompt de Gemini es ahora más estricto y está diseñado para buscar señales de buenas ofertas.
+# - PUNTUACIÓN DE OFERTA: Los resultados finales se ordenan por un puntaje que combina alta relevancia y bajo precio, en lugar de solo por precio.
+# - CONOCIMIENTO DE TIENDAS: El bot ahora tiene listas de tiendas prioritarias, de hogar y de descuento para búsquedas más dirigidas.
 # ==============================================================================
-
-import os
-import sys # Importar sys para ver la versión de Python
-
-# --- INICIO DEL BLOQUE DE DIAGNÓSTICO ---
-print("=============================================")
-print("INICIANDO MODO DE DIAGNÓSTICO EN RENDER")
-print(f"Versión de Python: {sys.version}")
-print("Verificando la presencia de variables de entorno...")
-
-# Leer cada variable de entorno
-google_api_key_check = os.environ.get("GOOGLE_API_KEY")
-search_engine_id_check = os.environ.get("PROGRAMMABLE_SEARCH_ENGINE_ID")
-gemini_key_check = os.environ.get("GEMINI_API_KEY")
-firebase_key_check = os.environ.get("FIREBASE_WEB_API_KEY")
-flask_secret_check = os.environ.get("FLASK_SECRET_KEY")
-
-
-# Imprimir el estado de cada variable
-print(f"GOOGLE_API_KEY: {'PRESENTE' if google_api_key_check else '!!! AUSENTE !!!'}")
-print(f"PROGRAMMABLE_SEARCH_ENGINE_ID: {'PRESENTE' if search_engine_id_check else '!!! AUSENTE !!!'}")
-print(f"GEMINI_API_KEY: {'PRESENTE' if gemini_key_check else '!!! AUSENTE !!!'}")
-print(f"FIREBASE_WEB_API_KEY: {'PRESENTE' if firebase_key_check else '!!! AUSENTE !!!'}")
-print(f"FLASK_SECRET_KEY: {'PRESENTE' if flask_secret_check else '!!! AUSENTE !!!'}")
-
-
-# Imprimir los primeros caracteres para confirmar que no están vacías
-if google_api_key_check:
-    print(f"  -> Primeros 5 chars de GOOGLE_API_KEY: {google_api_key_check[:5]}...")
-if search_engine_id_check:
-    print(f"  -> Valor completo de PROGRAMMABLE_SEARCH_ENGINE_ID: {search_engine_id_check}")
-
-print("=============================================")
-# --- FIN DEL BLOQUE DE DIAGNÓSTICO ---
-
 
 # --- IMPORTS DE LIBRERÍAS ---
 import requests
 import re
 import json
+import os
 import io
 import traceback
 from typing import Dict, List, Optional, Tuple, Any
@@ -66,7 +35,6 @@ except ImportError:
     print("⚠️ AVISO: 'google-generativeai' no está instalado.")
     genai = None; google_exceptions = None
 
-# ¡NUEVO! Import para la API de Búsqueda de Google
 try:
     from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
@@ -80,11 +48,8 @@ except ImportError:
 # ==============================================================================
 app = Flask(__name__)
 
-# --- CLAVES DE APIS ---
-# ¡NUEVO! Credenciales para la API de Búsqueda de Google que se leerán desde Render.com
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 PROGRAMMABLE_SEARCH_ENGINE_ID = os.environ.get("PROGRAMMABLE_SEARCH_ENGINE_ID")
-
 FIREBASE_WEB_API_KEY = os.environ.get("FIREBASE_WEB_API_KEY")
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'una-clave-secreta-muy-fuerte')
@@ -158,14 +123,17 @@ def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list
     
     print(f"  🤖⚖️ Calificando oferta: '{candidate['title']}'...")
     prompt = (
-        f"You are a shopping expert AI. Analyze the product page data and return a JSON object with your ratings.\n\n"
-        f"DATA:\n- User's Search: '{original_query}'\n- Page Title: '{candidate['title']}'\n- Page Text: '{candidate['text_content']}'\n\n"
+        f"You are a critical shopping expert AI. Your goal is to find the best value. Analyze this product page data and return a JSON object.\n\n"
+        f"DATA:\n"
+        f"- User's Search: '{original_query}'\n"
+        f"- Page Title: '{candidate['title']}'\n"
+        f"- Page Text (first 2000 chars): '{candidate['text_content']}'\n\n"
         f"TASKS & SCORING:\n"
-        f"1.  **Extract Price & Currency:** Find the main product's price and its 3-letter currency code (e.g., 'USD', 'MXN'). Assume 'USD' if unclear.\n"
-        f"2.  **Relevance Score (1-10):** How closely does this product match the user's search? 10 is perfect. Below 5 is a different product.\n"
-        f"3.  **Price Accuracy Score (1-10):** How confident are you the price is correct for a single unit? 10 is very confident.\n"
-        f"4.  **US Centric Check:** Does this store operate in or ship to the USA? This is critical.\n\n"
-        f"Return a JSON with these keys: `price` (float), `currency` (string), `relevance_score` (int), `price_accuracy_score` (int), `is_usa_centric` (boolean), `reasoning` (string)."
+        f"1.  **Extract Price & Currency:** Find the *final, non-sale price* for a single unit. Use 'USD' if unclear. If you see words like 'sale', 'clearance', or 'discount', note it in your reasoning.\n"
+        f"2.  **Relevance Score (1-10):** Be strict. How perfectly does this product match the user's search? 10 is an exact match. Below 6 means it's a different model, color, or a related accessory. Be very critical.\n"
+        f"3.  **Price Accuracy Score (1-10):** How confident are you that this is the main product's price, not a price for a part, a subscription, or a bulk offer? 10 is very confident.\n"
+        f"4.  **US Centric Check:** Does this store clearly operate in or ship to the USA? This is a critical requirement.\n\n"
+        f"Return a single, valid JSON object with these keys: `price` (float), `currency` (string), `relevance_score` (int), `price_accuracy_score` (int), `is_usa_centric` (boolean), `reasoning` (string, max 20 words, explaining your relevance and price decision)."
     )
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
@@ -192,6 +160,11 @@ class SmartShoppingBot:
             print("✅ Servicio de Búsqueda de Google (Custom Search) inicializado.")
         except Exception as e:
             print(f"❌ ERROR al inicializar el servicio de Búsqueda de Google: {e}")
+        
+        # ¡NUEVO! Listas de tiendas especializadas
+        self.high_priority_stores = ["amazon.com", "walmart.com", "ebay.com", "target.com", "bestbuy.com"]
+        self.home_improvement_stores = ["homedepot.com", "lowes.com", "acehardware.com", "harborfreight.com"]
+        self.discount_retailers = ["overstock.com", "wayfair.com", "newegg.com", "bhphotovideo.com"]
             
         self.MAX_RESULTS_TO_RETURN = 30
         self.MINIMUM_RESULTS_TARGET = 10
@@ -233,7 +206,7 @@ class SmartShoppingBot:
             future_to_candidate = {executor.submit(_get_ai_analysis, c, original_query, errors_list): c for c in candidates_for_judgement}
             for future in as_completed(future_to_candidate):
                 candidate_data, analysis = future_to_candidate[future], future.result()
-                if analysis.get('is_usa_centric', False) and analysis.get('relevance_score', 0) >= 5 and analysis.get('price_accuracy_score', 0) >= 5:
+                if analysis.get('is_usa_centric', False) and analysis.get('relevance_score', 0) >= 6 and analysis.get('price_accuracy_score', 0) >= 5:
                     currency = analysis.get('currency', 'USD').upper(); rate = CURRENCY_RATES_TO_USD.get(currency)
                     if rate:
                         original_price = float(analysis.get('price', 99999)); price_in_usd = original_price * rate
@@ -256,32 +229,56 @@ class SmartShoppingBot:
             enhanced_query = _enhance_query_for_purchase(original_query, errors_list)
             if not enhanced_query: return [], ["No se pudo generar una consulta válida."], errors_list
             
-            # --- BÚSQUEDA SECUENCIAL Y PRIORIZADA ---
             all_urls = set()
             
-            print("--- Iniciando Búsqueda Priorizada en Google ---")
-            urls = self._run_single_search_task(enhanced_query, start=1)
+            # --- NUEVA ESTRATEGIA DE BÚSQUEDA POR OLEADAS ---
+            
+            # OLEADA 1: Búsqueda de alta precisión
+            print("--- OLEADA 1: Búsqueda de Alta Precisión ---")
+            queries_wave_1 = [
+                f'"{enhanced_query}" buy online usa',
+                f'{enhanced_query} price'
+            ]
+            for q in queries_wave_1:
+                urls = self._run_single_search_task(q, start=1)
+                for url in urls: all_urls.add(url)
+
+            # OLEADA 2: Búsqueda en tiendas de alta prioridad
+            print("--- OLEADA 2: Búsqueda en Tiendas Prioritarias ---")
+            store_query_part = " OR ".join([f"site:{store}" for store in self.high_priority_stores])
+            store_query = f'({store_query_part}) "{enhanced_query}"'
+            urls = self._run_single_search_task(store_query, start=1)
             for url in urls: all_urls.add(url)
             
+            # Procesamos los resultados iniciales para ver si son suficientes
             final_results = self._process_and_validate_candidates(list(all_urls), original_query, errors_list)
 
+            # OLEADA 3: Búsqueda expandida (si no tenemos suficientes resultados)
             if len(final_results) < self.MINIMUM_RESULTS_TARGET:
-                print(f"--- Menos de {self.MINIMUM_RESULTS_TARGET} resultados. Expandiendo búsqueda... ---")
+                print(f"--- OLEADA 3: Expandiendo a Búsqueda Amplia y de Descuento ---")
                 
-                urls = self._run_single_search_task(enhanced_query, start=11)
+                # Búsquedas con palabras clave de ofertas
+                queries_wave_3 = [
+                    f'{enhanced_query} sale',
+                    f'{enhanced_query} discount'
+                ]
+                for q in queries_wave_3:
+                    urls = self._run_single_search_task(q, start=1)
+                    for url in urls: all_urls.add(url)
+                
+                # Búsqueda en tiendas de nicho y de descuento
+                niche_stores = self.home_improvement_stores + self.discount_retailers
+                niche_query_part = " OR ".join([f"site:{store}" for store in niche_stores])
+                niche_query = f'({niche_query_part}) "{enhanced_query}"'
+                urls = self._run_single_search_task(niche_query, start=1)
                 for url in urls: all_urls.add(url)
 
-                high_priority_stores = ["amazon.com", "walmart.com", "ebay.com", "target.com", "homedepot.com", "lowes.com"]
-                store_query_part = " OR ".join([f"site:{store}" for store in high_priority_stores])
-                store_query = f"({store_query_part}) \"{original_query}\""
-                urls = self._run_single_search_task(store_query, start=1)
-                for url in urls: all_urls.add(url)
-                
+                # Volvemos a procesar con el conjunto completo de URLs
                 final_results = self._process_and_validate_candidates(list(all_urls), original_query, errors_list)
 
-            # --- INTENTO FINAL: BÚSQUEDA FLEXIBLE (FALLBACK) ---
+            # OLEADA 4: Búsqueda Flexible (FALLBACK)
             if not final_results:
-                print("--- Búsqueda principal sin resultados. Iniciando Búsqueda Flexible. ---")
+                print("--- OLEADA 4: Búsqueda Flexible (Fallback) ---")
                 fallback_query = _get_fallback_query_from_ai(original_query, errors_list)
                 if fallback_query:
                     fallback_urls = self._run_single_search_task(fallback_query, start=1)
@@ -293,9 +290,12 @@ class SmartShoppingBot:
                 print("✅ BÚSQUEDA COMPLETA. No se encontraron ofertas de alta calidad.")
                 return [], [], errors_list
             
-            final_results = sorted(final_results, key=lambda p: p.price_in_usd)
+            # ¡NUEVO! Clasificación por "Puntaje de Oferta"
+            # Esta fórmula prioriza la alta relevancia y penaliza el precio alto.
+            # Se eleva al cuadrado la relevancia para darle más peso.
+            final_results = sorted(final_results, key=lambda p: ( (p.relevance_score ** 2) / p.price_in_usd if p.price_in_usd > 0 else 0), reverse=True)
             
-            print(f"✅ BÚSQUEDA COMPLETA. Se encontraron {len(final_results)} ofertas de calidad.")
+            print(f"✅ BÚSQUEDA COMPLETA. Se encontraron {len(final_results)} ofertas de calidad, ordenadas por el mejor puntaje.")
             return final_results[:self.MAX_RESULTS_TO_RETURN], [], errors_list
 
         except Exception as e:
@@ -307,7 +307,6 @@ class SmartShoppingBot:
 # ==============================================================================
 # SECCIÓN 3: RUTAS FLASK Y EJECUCIÓN
 # ==============================================================================
-# ¡ACTUALIZADO! Se instancia el bot con las credenciales de Google.
 shopping_bot = SmartShoppingBot(google_api_key=GOOGLE_API_KEY, search_engine_id=PROGRAMMABLE_SEARCH_ENGINE_ID)
 
 @app.route('/')
@@ -352,7 +351,6 @@ def api_search():
 
 # ==============================================================================
 # SECCIÓN 4: PLANTILLAS HTML Y EJECUCIÓN
-# (Las plantillas HTML no han cambiado y se incluyen aquí para que el archivo sea completo)
 # ==============================================================================
 AUTH_TEMPLATE_LOGIN_ONLY = """
 <!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Acceso | Smart Shopping Bot</title><link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet"><style>:root{--primary-color:#4A90E2;--secondary-color:#50E3C2;--text-color-dark:#2C3E50;--card-bg:#FFFFFF;--shadow-medium:rgba(0,0,0,0.15)}body{font-family:'Poppins',sans-serif;background:linear-gradient(135deg,var(--primary-color) 0%,var(--secondary-color) 100%);min-height:100vh;display:flex;justify-content:center;align-items:center;padding:20px}.auth-container{max-width:480px;width:100%;background:var(--card-bg);border-radius:20px;box-shadow:0 25px 50px var(--shadow-medium);overflow:hidden;animation:fadeIn .8s ease-out}@keyframes fadeIn{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}.form-header{text-align:center;padding:40px 30px 20px}.form-header h1{color:var(--text-color-dark);font-size:2em;margin-bottom:10px}.form-header p{color:#7f8c8d;font-size:1.1em}.form-body{padding:10px 40px 40px}form{display:flex;flex-direction:column;gap:20px}.input-group{display:flex;flex-direction:column;gap:8px}.input-group label{font-weight:600;color:var(--text-color-dark);font-size:.95em}.input-group input{padding:16px 20px;border:2px solid #e0e0e0;border-radius:12px;font-size:16px;transition:all .3s ease}.input-group input:focus{outline:0;border-color:var(--primary-color);box-shadow:0 0 0 4px rgba(74,144,226,.2)}.submit-btn{background:linear-gradient(45deg,var(--primary-color),#2980b9);color:#fff;border:none;padding:16px 30px;font-size:1.1em;font-weight:600;border-radius:12px;cursor:pointer;transition:all .3s ease;margin-top:15px}.submit-btn:hover{transform:translateY(-3px);box-shadow:0 12px 25px rgba(0,0,0,.2)}.flash-messages{list-style:none;padding:0 40px 20px}.flash{padding:15px;margin-bottom:15px;border-radius:8px;text-align:center}.flash.success{background-color:#d4edda;color:#155724}.flash.danger{background-color:#f8d7da;color:#721c24}.flash.warning{background-color:#fff3cd;color:#856404}</style></head><body><div class="auth-container"><div class="form-header"><h1>Bienvenido de Nuevo</h1><p>Accede para encontrar las mejores ofertas.</p></div>{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<ul class=flash-messages>{% for category, message in messages %}<li class="flash {{ category }}">{{ message }}</li>{% endfor %}</ul>{% endif %}{% endwith %}<div class="form-body"><form id="login-form" action="{{ url_for('login') }}" method="post"><div class="input-group"><label for="login-email">Correo</label><input type="email" name="email" required></div><div class="input-group"><label for="login-password">Contraseña</label><input type="password" name="password" required></div><button type="submit" class="submit-btn">Entrar</button></form></div></div></body></html>
@@ -384,7 +382,6 @@ SEARCH_TEMPLATE = """
         }).then(response => response.json()).then(data => {
             loadingDiv.style.display = "none";
 
-            // Lógica para mostrar mensaje de búsqueda flexible
             let isAlternative = data.results.length > 0 && data.results[0].is_alternative_suggestion;
             if (data.errors && data.errors.length > 0) {
                 let errorHTML = '<ul>';
@@ -406,13 +403,14 @@ SEARCH_TEMPLATE = """
                 data.results.forEach(product => {
                     const reasoning = product.reasoning.replace(/"/g, '"');
                     const originalPrice = `${product.original_price.toFixed(2)} ${product.original_currency}`;
+                    const scoreInfo = `Relevancia: ${product.relevance_score}/10 | Precisión Precio: ${product.price_accuracy_score}/10`;
                     productsGrid.innerHTML += `
                         <div class="product-card">
                             <div class="product-image"><img src="${product.image_url || 'https://via.placeholder.com/300'}" alt="${product.name}" onerror="this.onerror=null;this.src='https://via.placeholder.com/300';"></div>
                             <div class="product-info">
-                                <div class="product-title" title="IA Reasoning: ${reasoning}">${product.name}</div>
+                                <div class="product-title" title="Análisis IA: ${reasoning}">${product.name}</div>
                                 <div class="price-store-wrapper">
-                                    <div class="current-price" title="Original: ${originalPrice}">$${product.price_in_usd.toFixed(2)}</div>
+                                    <div class="current-price" title="Original: ${originalPrice} | ${scoreInfo}">$${product.price_in_usd.toFixed(2)}</div>
                                     <div class="store-link"><a href="${product.url}" target="_blank">Ver en ${product.store}</a></div>
                                 </div>
                             </div>
