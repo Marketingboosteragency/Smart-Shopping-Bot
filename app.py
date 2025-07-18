@@ -1,13 +1,13 @@
-# app.py (versión 22.0 - Motor de Búsqueda de Cobertura Total)
+# app.py (versión 22.0 - Motor de Búsqueda Estratégica y Controlada)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 22.0 (Total Coverage Search Engine)
+# Versión: 22.0 (Strategic & Throttled Search Engine)
 # Novedades:
-# - PROFUNDIDAD DE BÚSQUEDA AUMENTADA: Ahora se analizan las primeras 5 páginas de resultados de Google.
-# - VARIEDAD DE CONSULTAS EXPANDIDA: Un nuevo sistema genera hasta 10 variantes de búsqueda (exacta, de oferta, de compra, etc.) para una cobertura máxima.
-# - ALCANCE DE TIENDAS AMPLIADO: Se han añadido más tiendas especializadas a la lista de búsqueda prioritaria.
-# - AUMENTO DE CANDIDATOS: El sistema ahora valida hasta 50 de los candidatos más prometedores.
+# - CORRECCIÓN DE ERROR 429: Se rediseñó la recolección de datos para evitar ser bloqueado por la API de SerpApi.
+# - BÚSQUEDA EN TIENDAS CONSOLIDADA: En lugar de una llamada por tienda, ahora se usa una única y potente consulta para buscar en todas las tiendas prioritarias a la vez.
+# - REDUCCIÓN DE TAREAS Y CONTROL DE CONCURRENCIA: Se ha reducido drásticamente el número de búsquedas paralelas a un nivel seguro y eficiente.
+# - MANTIENE LA LÓGICA DE FALLBACK: El sistema sigue siendo resiliente y puede realizar una búsqueda flexible si el primer intento falla.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -134,23 +134,9 @@ def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list
         return default_failure
     except Exception: return default_failure
 
-def _generate_query_variants(base_query: str, original_query: str) -> List[str]:
-    """Genera un conjunto diverso de consultas de búsqueda para una cobertura máxima."""
-    variants = {
-        base_query,
-        f'"{original_query}"', # Búsqueda exacta
-        f'buy {base_query}',
-        f'"{original_query}" for sale',
-        f'best price for "{base_query}"',
-        f'"{original_query}" in stock USA',
-        f'{base_query} online store'
-    }
-    return list(variants)
-
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
-        # MODIFICACIÓN: Aumentar la cantidad de resultados
         self.TOP_N_CANDIDATES_TO_VALIDATE = 50
         self.MAX_RESULTS_TO_RETURN = 40
 
@@ -167,22 +153,25 @@ class SmartShoppingBot:
         except Exception as e: print(f"❌ Error en sub-búsqueda ({engine}): {e}")
         return urls
 
-    def get_candidate_urls_exhaustively(self, queries: List[str], original_query: str) -> List[str]:
-        print("--- FASE 1: Iniciando Búsqueda Exhaustiva de Candidatos ---")
+    def get_candidate_urls_strategically(self, base_query: str, original_query: str) -> List[str]:
+        print("--- FASE 1: Iniciando Búsqueda Estratégica de Candidatos ---")
         tasks = []
-        # MODIFICACIÓN: Añadir más tiendas a la búsqueda dirigida
-        high_priority_stores = ["amazon.com", "walmart.com", "ebay.com", "target.com", "bestbuy.com", "homedepot.com", "lowes.com", "grainger.com", "uline.com", "zoro.com", "mscdirect.com", "newegg.com", "bhphotovideo.com"]
+        high_priority_stores = ["amazon.com", "walmart.com", "ebay.com", "target.com", "homedepot.com", "lowes.com", "grainger.com", "uline.com", "zoro.com"]
         
-        for query in queries:
-            # MODIFICACIÓN: Aumentar la profundidad de búsqueda a 5 páginas
-            for i in range(5): tasks.append({"query": query, "engine": "google", "start": i * 10})
-            tasks.append({"query": query, "engine": "google_shopping", "start": 0})
-        
-        for store in high_priority_stores: tasks.append({"query": f'site:{store} "{original_query}"', "engine": "google", "start": 0})
+        # Búsqueda Consolidada en Tiendas
+        store_query_part = " OR ".join([f"site:{store}" for store in high_priority_stores])
+        store_query = f"({store_query_part}) \"{original_query}\""
+        tasks.append({"query": store_query, "engine": "google", "start": 0})
 
-        print(f"  🔥 Ejecutando {len(tasks)} tareas de búsqueda en paralelo...")
+        # Búsqueda Orgánica (2 páginas)
+        for i in range(2): tasks.append({"query": base_query, "engine": "google", "start": i * 10})
+        
+        # Búsqueda en Google Shopping
+        tasks.append({"query": base_query, "engine": "google_shopping", "start": 0})
+
+        print(f"  🔥 Ejecutando {len(tasks)} tareas de búsqueda estratégicas en paralelo...")
         all_urls = set()
-        with ThreadPoolExecutor(max_workers=15) as executor:
+        with ThreadPoolExecutor(max_workers=5) as executor: # MODIFICACIÓN: Reducir la concurrencia
             future_to_task = {executor.submit(self._run_search_task, **task): task for task in tasks}
             for future in as_completed(future_to_task):
                 for url in future.result(): all_urls.add(url)
@@ -198,7 +187,7 @@ class SmartShoppingBot:
         analyzed_products = []
         with ThreadPoolExecutor(max_workers=10) as executor:
             scraped_candidates = list(executor.map(_deep_scrape_content, filtered_urls))
-            candidates_for_judgement = [c for c in scraped_candidates if c['text_content']]
+            candidates_for_judgement = [c for c in scraped_candidates if c['text_content'] and len(c['text_content']) > 50]
             print(f"--- FASE 2: Sometiendo a juicio de IA a {len(candidates_for_judgement)} candidatos. ---")
             
             future_to_candidate = {executor.submit(_get_ai_analysis, c, original_query, errors_list): c for c in candidates_for_judgement}
@@ -207,7 +196,7 @@ class SmartShoppingBot:
                 if analysis.get('is_usa_centric', False) and analysis.get('relevance_score', 0) >= 5 and analysis.get('price_accuracy_score', 0) >= 5:
                     currency = analysis.get('currency', 'USD').upper(); rate = CURRENCY_RATES_TO_USD.get(currency)
                     if rate:
-                        original_price = float(analysis['price']); price_in_usd = original_price * rate
+                        original_price = float(analysis.get('price', 99999)); price_in_usd = original_price * rate
                         if price_in_usd >= 0.50:
                             analyzed_products.append(ProductResult(
                                 name=candidate_data['title'], store=urlparse(candidate_data['url']).netloc.replace('www.', '').split('.')[0].capitalize(),
@@ -227,15 +216,14 @@ class SmartShoppingBot:
             enhanced_query = _enhance_query_for_purchase(original_query, errors_list)
             if not enhanced_query: return [], ["No se pudo generar una consulta válida."], errors_list
             
-            query_variants = _generate_query_variants(enhanced_query, original_query)
-            candidate_urls = self.get_candidate_urls_exhaustively(query_variants, original_query)
+            candidate_urls = self.get_candidate_urls_strategically(enhanced_query, original_query)
             final_results = self._process_and_validate_candidates(candidate_urls, original_query, errors_list)
 
             if not final_results:
                 print("--- Búsqueda de Alta Precisión sin resultados. Iniciando Búsqueda Flexible. ---")
                 fallback_query = _get_fallback_query_from_ai(original_query, errors_list)
                 if fallback_query:
-                    fallback_candidate_urls = self.get_candidate_urls_exhaustively([fallback_query], fallback_query)
+                    fallback_candidate_urls = self.get_candidate_urls_strategically(fallback_query, fallback_query)
                     final_results = self._process_and_validate_candidates(fallback_candidate_urls, original_query, errors_list, is_fallback=True)
                     if final_results:
                         errors_list.insert(0, "No encontramos resultados exactos. Pero aquí hay algunas opciones similares que podrían interesarte.")
@@ -258,12 +246,13 @@ class SmartShoppingBot:
 # ==============================================================================
 # SECCIÓN 3: RUTAS FLASK Y EJECUCIÓN
 # ==============================================================================
-# (El código de Flask no requiere cambios, se mantiene igual)
 shopping_bot = SmartShoppingBot(SERPAPI_KEY)
+
 @app.route('/')
 def index():
     if 'user_id' in session: return redirect(url_for('main_app_page'))
     return render_template_string(AUTH_TEMPLATE_LOGIN_ONLY)
+
 @app.route('/login', methods=['POST'])
 def login():
     if not FIREBASE_WEB_API_KEY: flash('Servicio no configurado.', 'danger'); return redirect(url_for('index'))
@@ -279,13 +268,16 @@ def login():
         error_message = e.response.json().get('error', {}).get('message', 'ERROR')
         flash('Correo o contraseña incorrectos.' if 'INVALID' in error_message else f'Error: {error_message}', 'danger'); return redirect(url_for('index'))
     except Exception as e: flash(f'Ocurrió un error inesperado: {e}', 'danger'); return redirect(url_for('index'))
+
 @app.route('/logout')
 def logout():
     session.clear(); flash('Has cerrado la sesión.', 'success'); return redirect(url_for('index'))
+
 @app.route('/app')
 def main_app_page():
     if 'user_id' not in session: flash('Debes iniciar sesión para acceder.', 'warning'); return redirect(url_for('index'))
     return render_template_string(SEARCH_TEMPLATE, user_name=session.get('user_name', 'Usuario'))
+
 @app.route('/api/search', methods=['POST'])
 def api_search():
     if 'user_id' not in session: return jsonify({'error': 'No autorizado'}), 401
