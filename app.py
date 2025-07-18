@@ -1,19 +1,51 @@
-# app.py (versión 24.0 - Integración con API Oficial de Google)
+# app.py (versión 24.1 - MODO DE DIAGNÓSTICO)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 24.0 (Google Custom Search API Integration)
+# Versión: 24.1 (Modo de Diagnóstico para Render)
 # Novedades:
-# - REEMPLAZO DE SERPAPI: Se elimina la dependencia de SerpApi y se integra la API oficial de Google Custom Search para mayor estabilidad y cumplimiento.
-# - ARQUITECTURA SIMPLIFICADA: La lógica de búsqueda se adapta al nuevo proveedor de API, manteniendo la estrategia de búsqueda secuencial y priorizada.
-# - ROBUSTEZ MEJORADA: Se utiliza el cliente oficial de Google para Python, con manejo de errores específico para la API de Google.
+# - Se añaden prints de diagnóstico para verificar las variables de entorno en los logs de Render.
 # ==============================================================================
+
+import os
+import sys # Importar sys para ver la versión de Python
+
+# --- INICIO DEL BLOQUE DE DIAGNÓSTICO ---
+print("=============================================")
+print("INICIANDO MODO DE DIAGNÓSTICO EN RENDER")
+print(f"Versión de Python: {sys.version}")
+print("Verificando la presencia de variables de entorno...")
+
+# Leer cada variable de entorno
+google_api_key_check = os.environ.get("GOOGLE_API_KEY")
+search_engine_id_check = os.environ.get("PROGRAMMABLE_SEARCH_ENGINE_ID")
+gemini_key_check = os.environ.get("GEMINI_API_KEY")
+firebase_key_check = os.environ.get("FIREBASE_WEB_API_KEY")
+flask_secret_check = os.environ.get("FLASK_SECRET_KEY")
+
+
+# Imprimir el estado de cada variable
+print(f"GOOGLE_API_KEY: {'PRESENTE' if google_api_key_check else '!!! AUSENTE !!!'}")
+print(f"PROGRAMMABLE_SEARCH_ENGINE_ID: {'PRESENTE' if search_engine_id_check else '!!! AUSENTE !!!'}")
+print(f"GEMINI_API_KEY: {'PRESENTE' if gemini_key_check else '!!! AUSENTE !!!'}")
+print(f"FIREBASE_WEB_API_KEY: {'PRESENTE' if firebase_key_check else '!!! AUSENTE !!!'}")
+print(f"FLASK_SECRET_KEY: {'PRESENTE' if flask_secret_check else '!!! AUSENTE !!!'}")
+
+
+# Imprimir los primeros caracteres para confirmar que no están vacías
+if google_api_key_check:
+    print(f"  -> Primeros 5 chars de GOOGLE_API_KEY: {google_api_key_check[:5]}...")
+if search_engine_id_check:
+    print(f"  -> Valor completo de PROGRAMMABLE_SEARCH_ENGINE_ID: {search_engine_id_check}")
+
+print("=============================================")
+# --- FIN DEL BLOQUE DE DIAGNÓSTICO ---
+
 
 # --- IMPORTS DE LIBRERÍAS ---
 import requests
 import re
 import json
-import os
 import io
 import traceback
 from typing import Dict, List, Optional, Tuple, Any
