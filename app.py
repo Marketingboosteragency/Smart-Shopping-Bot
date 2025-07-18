@@ -1,13 +1,12 @@
-# app.py (versión 19.0 - Motor de Caza de Ofertas Agresivo)
+# app.py (versión 20.0 - Motor de Prioridad de Precios)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 19.0 (Aggressive Bargain Hunter Engine)
+# Versión: 20.0 (Price-First Engine)
 # Novedades:
-# - ALGORITMO "PRECIO PRIMERO": El "Deal Score" ha sido rediseñado para penalizar masivamente los precios altos, priorizando las ofertas más baratas.
-# - FILTRO GEOGRÁFICO ESTRICTO: La IA ahora descarta implacablemente cualquier resultado que no sea verificado como relevante para los Estados Unidos.
-# - EXPANSIÓN DE BÚSQUEDA MASIVA: Se ha aumentado la profundidad de búsqueda a 3 páginas de Google y el número de candidatos a validar a 25 para obtener más resultados.
-# - ARQUITECTURA ROBUSTA: Se mantiene el motor de producción endurecido para prevenir fallos críticos.
+# - ORDENACIÓN DIRECTA POR PRECIO: Se elimina el complejo 'Deal Score'. Los resultados ahora se ordenan estrictamente por precio (del más barato al más caro).
+# - AUMENTO DE LA CANTIDAD DE RESULTADOS: Se ha incrementado el número de candidatos a validar y el máximo de resultados a mostrar para obtener listas más completas.
+# - FILTRO GEOGRÁFICO DE EE.UU. MANTENIDO: El filtro que asegura que los resultados sean de Estados Unidos sigue siendo una prioridad estricta.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -59,7 +58,7 @@ if genai and GEMINI_API_KEY:
 class ProductResult:
     name: str; store: str; url: str; image_url: str = ""
     price_in_usd: float = 0.0; original_price: float = 0.0; original_currency: str = "USD"
-    relevance_score: int = 0; price_accuracy_score: int = 0; deal_score: float = 0.0
+    relevance_score: int = 0; price_accuracy_score: int = 0;
     reasoning: str = ""
 
 CURRENCY_RATES_TO_USD = {"USD": 1.0, "DOP": 0.017, "MXN": 0.054, "CAD": 0.73, "EUR": 1.08, "GBP": 1.27}
@@ -122,8 +121,9 @@ def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
-        self.TOP_N_CANDIDATES_TO_VALIDATE = 25
-        self.MAX_RESULTS_TO_RETURN = 15
+        # MODIFICACIÓN: Aumentar la cantidad de resultados
+        self.TOP_N_CANDIDATES_TO_VALIDATE = 35
+        self.MAX_RESULTS_TO_RETURN = 25
 
     def _run_search_task(self, query: str, engine: str, start: int = 0) -> List[str]:
         urls = []
@@ -143,7 +143,7 @@ class SmartShoppingBot:
         tasks = []
         high_priority_stores = ["homedepot.com", "lowes.com", "grainger.com", "uline.com", "lumberliquidators.com", "amazon.com", "walmart.com", "ebay.com", "zoro.com"]
         
-        # Búsqueda Orgánica Profunda (3 páginas)
+        # MODIFICACIÓN: Aumentar la profundidad de búsqueda a 3 páginas
         for i in range(3): tasks.append({"query": base_query, "engine": "google", "start": i * 10})
         tasks.append({"query": base_query, "engine": "google_shopping", "start": 0})
         for store in high_priority_stores: tasks.append({"query": f'site:{store} "{original_query}"', "engine": "google", "start": 0})
@@ -182,8 +182,8 @@ class SmartShoppingBot:
                 future_to_candidate = {executor.submit(_get_ai_analysis, c, original_query, errors_list): c for c in candidates_for_judgement}
                 for future in as_completed(future_to_candidate):
                     candidate_data, analysis = future_to_candidate[future], future.result()
-                    # FILTRO ESTRICTO DE EE.UU. Y CALIDAD MÍNIMA
-                    if analysis.get('is_usa_centric', False) and analysis.get('relevance_score', 0) >= 4 and analysis.get('price_accuracy_score', 0) >= 4:
+                    # MODIFICACIÓN: Filtro estricto de EE.UU. y calidad mínima
+                    if analysis.get('is_usa_centric', False) and analysis.get('relevance_score', 0) >= 5 and analysis.get('price_accuracy_score', 0) >= 5:
                         currency = analysis.get('currency', 'USD').upper(); rate = CURRENCY_RATES_TO_USD.get(currency)
                         if rate:
                             original_price = float(analysis['price']); price_in_usd = original_price * rate
@@ -197,21 +197,10 @@ class SmartShoppingBot:
             
             if not analyzed_products: return [], [], errors_list
             
-            # --- FASE 3: CALCULAR "DEAL SCORE" Y ORDENAR (ROBUSTO) ---
-            if len(analyzed_products) == 1:
-                analyzed_products[0].deal_score = analyzed_products[0].relevance_score * 5
-                return analyzed_products[:self.MAX_RESULTS_TO_RETURN], [], errors_list
-
-            prices = [p.price_in_usd for p in analyzed_products]
-            min_price, max_price = min(prices), max(prices)
+            # --- FASE 3: ORDENAR POR PRECIO ---
+            # MODIFICACIÓN: Se elimina el 'deal_score' y se ordena directamente por el precio más bajo.
+            final_results = sorted(analyzed_products, key=lambda p: p.price_in_usd)
             
-            for p in analyzed_products:
-                price_range = max_price - min_price
-                normalized_price = (p.price_in_usd - min_price) / price_range if price_range > 0 else 0
-                price_penalty = normalized_price * 15 # Penalización muy agresiva
-                p.deal_score = (p.relevance_score * 2) + (p.price_accuracy_score * 1) - price_penalty
-                
-            final_results = sorted(analyzed_products, key=lambda p: p.deal_score, reverse=True)
             print(f"✅ BÚSQUEDA COMPLETA. Se encontraron {len(final_results)} ofertas de calidad.")
             return final_results[:self.MAX_RESULTS_TO_RETURN], [], errors_list
 
@@ -274,7 +263,7 @@ AUTH_TEMPLATE_LOGIN_ONLY = """
 """
 
 SEARCH_TEMPLATE = """
-<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Smart Shopping Bot - Comparador de Precios</title><link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet"><style>:root{--primary-color:#4A90E2;--secondary-color:#50E3C2;--accent-color:#FF6B6B;--text-color-dark:#2C3E50;--text-color-light:#ECF0F1;--bg-light:#F8F9FA;--card-bg:#FFFFFF;--shadow-light:rgba(0,0,0,0.08);--shadow-medium:rgba(0,0,0,0.15)}body{font-family:'Poppins',sans-serif;background:var(--bg-light);min-height:100vh;padding:20px;color:var(--text-color-dark)}.container{max-width:1400px;width:100%;margin:0 auto;background:var(--card-bg);border-radius:20px;box-shadow:0 25px 50px var(--shadow-light);overflow:hidden}.header{background:linear-gradient(45deg,var(--text-color-dark),var(--primary-color));color:var(--text-color-light);padding:40px;text-align:center}.header h1{font-size:2.5em;margin-bottom:10px}.header p{font-size:1.1em;opacity:.9}.header a{color:var(--secondary-color);text-decoration:none;font-weight:600}.search-section{padding:50px;background:var(--bg-light);border-bottom:1px solid #e0e0e0}.search-form{display:flex;flex-direction:column;gap:25px;max-width:700px;margin:0 auto}.input-group{display:flex;flex-direction:column;gap:12px}.input-group label{font-weight:600;font-size:1.1em}.input-group input{padding:18px 20px;border:2px solid #e0e0e0;border-radius:12px;font-size:17px}.search-btn{background:linear-gradient(45deg,var(--primary-color),#2980b9);color:#fff;border:none;padding:18px 35px;font-size:1.2em;font-weight:600;border-radius:12px;cursor:pointer}.loading{text-align:center;padding:60px;display:none}.loading p{font-weight:600;color:var(--primary-color)}.spinner{border:5px solid rgba(74,144,226,.2);border-top:5px solid var(--primary-color);border-radius:50%;width:60px;height:60px;animation:spin 1s linear infinite;margin:0 auto 30px}@keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}.results-section{padding:50px;display:none}.api-errors{background-color:#fff3cd;color:#856404;padding:20px;border-radius:12px;margin-bottom:30px;text-align:left;border:1px solid #ffeeba}.api-errors ul{padding-left:20px;margin:0}.products-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:30px;margin-top:40px}.product-card{background:var(--card-bg);border-radius:18px;box-shadow:0 12px 30px var(--shadow-light);overflow:hidden;border:1px solid #eee;display:flex;flex-direction:column;position:relative}.product-image{width:100%;height:220px;display:flex;align-items:center;justify-content:center;overflow:hidden}.product-image img{width:100%;height:100%;object-fit:cover}.product-info{padding:25px;display:flex;flex-direction:column;flex-grow:1;justify-content:space-between}.product-title{font-size:1.1em;font-weight:600;margin-bottom:12px;color:var(--text-color-dark)}.price-store-wrapper{display:flex;justify-content:space-between;align-items:center;margin-top:auto}.current-price{font-size:1.8em;font-weight:700;color:var(--accent-color)}.store-link a{font-weight:600;color:var(--primary-color);text-decoration:none}#image-preview-container{display:none;align-items:center;gap:20px;margin-top:20px}#image-preview{max-height:100px;border-radius:10px}#remove-image-btn{background:var(--accent-color);color:#fff;border:none;border-radius:50%;width:35px;height:35px;cursor:pointer}</style></head><body><div class="container"><header class="header"><h1>Smart Shopping Bot</h1><p>Hola, <strong>{{ user_name }}</strong>. Encuentra los mejores precios online. | <a href="{{ url_for('logout') }}">Cerrar Sesión</a></p></header><section class="search-section"><form id="search-form" class="search-form"><div class="input-group"><label for="query">¿Qué producto buscas?</label><input type="text" id="query" name="query" placeholder="Ej: cinta de pintor azul 2 pulgadas"></div><div class="input-group"><label for="image_file">... o sube una imagen para una búsqueda más precisa</label><input type="file" id="image_file" name="image_file" accept="image/*"><div id="image-preview-container"><img id="image-preview" src="#" alt="Previsualización"><button type="button" id="remove-image-btn" title="Eliminar imagen">×</button></div></div><button type="submit" id="search-btn" class="search-btn">Buscar Precios</button></form></section><div id="loading" class="loading"><div class="spinner"></div><p>Ejecutando motor de búsqueda exhaustiva...</p></div><section id="results-section" class="results-section"><div id="api-errors" class="api-errors" style="display:none;"></div><h2 id="results-title">Las Mejores Ofertas Encontradas</h2><div id="products-grid" class="products-grid"></div></section></div>
+<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Smart Shopping Bot - Comparador de Precios</title><link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet"><style>:root{--primary-color:#4A90E2;--secondary-color:#50E3C2;--accent-color:#FF6B6B;--text-color-dark:#2C3E50;--text-color-light:#ECF0F1;--bg-light:#F8F9FA;--card-bg:#FFFFFF;--shadow-light:rgba(0,0,0,0.08);--shadow-medium:rgba(0,0,0,0.15)}body{font-family:'Poppins',sans-serif;background:var(--bg-light);min-height:100vh;padding:20px;color:var(--text-color-dark)}.container{max-width:1400px;width:100%;margin:0 auto;background:var(--card-bg);border-radius:20px;box-shadow:0 25px 50px var(--shadow-light);overflow:hidden}.header{background:linear-gradient(45deg,var(--text-color-dark),var(--primary-color));color:var(--text-color-light);padding:40px;text-align:center}.header h1{font-size:2.5em;margin-bottom:10px}.header p{font-size:1.1em;opacity:.9}.header a{color:var(--secondary-color);text-decoration:none;font-weight:600}.search-section{padding:50px;background:var(--bg-light);border-bottom:1px solid #e0e0e0}.search-form{display:flex;flex-direction:column;gap:25px;max-width:700px;margin:0 auto}.input-group{display:flex;flex-direction:column;gap:12px}.input-group label{font-weight:600;font-size:1.1em}.input-group input{padding:18px 20px;border:2px solid #e0e0e0;border-radius:12px;font-size:17px}.search-btn{background:linear-gradient(45deg,var(--primary-color),#2980b9);color:#fff;border:none;padding:18px 35px;font-size:1.2em;font-weight:600;border-radius:12px;cursor:pointer}.loading{text-align:center;padding:60px;display:none}.loading p{font-weight:600;color:var(--primary-color)}.spinner{border:5px solid rgba(74,144,226,.2);border-top:5px solid var(--primary-color);border-radius:50%;width:60px;height:60px;animation:spin 1s linear infinite;margin:0 auto 30px}@keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}.results-section{padding:50px;display:none}.api-errors{background-color:#fff3cd;color:#856404;padding:20px;border-radius:12px;margin-bottom:30px;text-align:left;border:1px solid #ffeeba}.api-errors ul{padding-left:20px;margin:0}.products-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:30px;margin-top:40px}.product-card{background:var(--card-bg);border-radius:18px;box-shadow:0 12px 30px var(--shadow-light);overflow:hidden;border:1px solid #eee;display:flex;flex-direction:column;position:relative}.product-image{width:100%;height:220px;display:flex;align-items:center;justify-content:center;overflow:hidden}.product-image img{width:100%;height:100%;object-fit:cover}.product-info{padding:25px;display:flex;flex-direction:column;flex-grow:1;justify-content:space-between}.product-title{font-size:1.1em;font-weight:600;margin-bottom:12px;color:var(--text-color-dark)}.price-store-wrapper{display:flex;justify-content:space-between;align-items:center;margin-top:auto}.current-price{font-size:1.8em;font-weight:700;color:var(--accent-color)}.store-link a{font-weight:600;color:var(--primary-color);text-decoration:none}#image-preview-container{display:none;align-items:center;gap:20px;margin-top:20px}#image-preview{max-height:100px;border-radius:10px}#remove-image-btn{background:var(--accent-color);color:#fff;border:none;border-radius:50%;width:35px;height:35px;cursor:pointer}</style></head><body><div class="container"><header class="header"><h1>Smart Shopping Bot</h1><p>Hola, <strong>{{ user_name }}</strong>. Encuentra los mejores precios online. | <a href="{{ url_for('logout') }}">Cerrar Sesión</a></p></header><section class="search-section"><form id="search-form" class="search-form"><div class="input-group"><label for="query">¿Qué producto buscas?</label><input type="text" id="query" name="query" placeholder="Ej: cinta de pintor azul 2 pulgadas"></div><div class="input-group"><label for="image_file">... o sube una imagen para una búsqueda más precisa</label><input type="file" id="image_file" name="image_file" accept="image/*"><div id="image-preview-container"><img id="image-preview" src="#" alt="Previsualización"><button type="button" id="remove-image-btn" title="Eliminar imagen">×</button></div></div><button type="submit" id="search-btn" class="search-btn">Buscar Precios</button></form></section><div id="loading" class="loading"><div class="spinner"></div><p>Buscando las mejores ofertas en EE. UU...</p></div><section id="results-section" class="results-section"><div id="api-errors" class="api-errors" style="display:none;"></div><h2 id="results-title">Las Mejores Ofertas Encontradas</h2><div id="products-grid" class="products-grid"></div></section></div>
 <script>
     const searchForm = document.getElementById("search-form");
     const queryInput = document.getElementById("query");
@@ -310,13 +299,12 @@ SEARCH_TEMPLATE = """
                 document.getElementById("results-title").style.display = "block";
                 data.results.forEach(product => {
                     const reasoning = product.reasoning.replace(/"/g, '"');
-                    const dealScore = product.deal_score.toFixed(2);
                     const originalPrice = `${product.original_price.toFixed(2)} ${product.original_currency}`;
                     productsGrid.innerHTML += `
                         <div class="product-card">
                             <div class="product-image"><img src="${product.image_url || 'https://via.placeholder.com/300'}" alt="${product.name}" onerror="this.onerror=null;this.src='https://via.placeholder.com/300';"></div>
                             <div class="product-info">
-                                <div class="product-title" title="Deal Score: ${dealScore}\\nIA Reasoning: ${reasoning}">${product.name}</div>
+                                <div class="product-title" title="IA Reasoning: ${reasoning}">${product.name}</div>
                                 <div class="price-store-wrapper">
                                     <div class="current-price" title="Original: ${originalPrice}">$${product.price_in_usd.toFixed(2)}</div>
                                     <div class="store-link"><a href="${product.url}" target="_blank">Ver en ${product.store}</a></div>
