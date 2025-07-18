@@ -1,12 +1,13 @@
-# app.py (versión 23.0 - Motor de Búsqueda Secuencial y Priorizada)
+# app.py (versión 25.1 - Motor de Pre-validación y Arquitectura de Archivo Único)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 23.0 (Sequential & Prioritized Search Engine)
+# Versión: 25.1 (Pre-validation Engine in a Single File Architecture)
 # Novedades:
-# - CORRECCIÓN DEFINITIVA DE ERROR 429: Se reemplaza la búsqueda masiva en paralelo por una cascada secuencial y priorizada para respetar los límites de la API.
-# - BÚSQUEDA EFICIENTE: El bot ahora busca primero en la fuente más probable (Google Shopping) y solo expande la búsqueda si es necesario, ahorrando llamadas a la API.
-# - ARQUITECTURA ROBUSTA: Se mantiene el motor de producción endurecido y la lógica de fallback, ahora activada de forma más inteligente.
+# - ARQUITECTURA DE ARCHIVO ÚNICO: Se ha consolidado la lógica de `bot.py` y `config.py` en este único archivo para un despliegue simplificado.
+# - PRE-VALIDACIÓN POR IA: Se mantiene el filtro de IA ultrarrápido sobre los resultados iniciales de Google para un rendimiento y velocidad máximos.
+# - BÚSQUEDA EXHAUSTIVA Y ORDENACIÓN POR PRECIO: Se conserva la lógica más avanzada para encontrar la mayor cantidad de ofertas y ordenarlas por el precio más bajo.
+# - CÓDIGO ENDURECIDO: Se mantienen todas las mejoras de manejo de errores y robustez.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -54,6 +55,7 @@ if genai and GEMINI_API_KEY:
 # SECCIÓN 2: LÓGICA DEL SMART SHOPPING BOT
 # ==============================================================================
 
+# --- ESTRUCTURAS DE DATOS Y CONSTANTES ---
 @dataclass
 class ProductResult:
     name: str; store: str; url: str; image_url: str = ""
@@ -61,7 +63,15 @@ class ProductResult:
     relevance_score: int = 0; price_accuracy_score: int = 0;
     reasoning: str = ""; is_alternative_suggestion: bool = False
 
+@dataclass
+class SearchCandidate:
+    url: str
+    title: str = ""
+    snippet: str = ""
+
 CURRENCY_RATES_TO_USD = {"USD": 1.0, "DOP": 0.017, "MXN": 0.054, "CAD": 0.73, "EUR": 1.08, "GBP": 1.27}
+
+# --- FUNCIONES AUXILIARES DE SCRAPING Y IA ---
 
 def _deep_scrape_content(url: str) -> Dict[str, Any]:
     headers = {'User-Agent': UserAgent().random, 'Accept-Language': 'en-US,en;q=0.9', 'Referer': 'https://www.google.com/'}
@@ -72,183 +82,192 @@ def _deep_scrape_content(url: str) -> Dict[str, Any]:
         image_url = (og.get("content") for og in [soup.find("meta", property="og:image")] if og)
         image_url = urljoin(url, next(image_url, ''))
         title = soup.title.string.strip() if soup.title else 'No Title'
-        text_content = ' '.join(soup.stripped_strings)[:2000]
+        text_content = ' '.join(soup.stripped_strings)[:2500]
         return {'title': title, 'image': image_url, 'text_content': text_content, 'url': url}
     except Exception:
         return {'title': 'N/A', 'image': '', 'text_content': '', 'url': url}
 
-def _enhance_query_for_purchase(text: str, errors_list: List[str]) -> str:
+def _enhance_query(text: str) -> Optional[str]:
     if not genai or not text: return text
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         prompt = f"Enhance and translate this user's query into a specific, detailed English query for finding a product online. Query: '{text}'. Respond ONLY with the enhanced query."
         response = model.generate_content(prompt)
-        enhanced_query = response.text.strip()
-        print(f"  🧠 Consulta mejorada por IA: de '{text}' a '{enhanced_query}'.")
-        return enhanced_query
-    except google_exceptions.ResourceExhausted as e:
-        errors_list.append("Advertencia: Cuota de API superada para mejorar la consulta.")
+        return response.text.strip()
+    except Exception as e:
+        print(f"  ❌ Error al mejorar la consulta: {e}")
         return text
-    except Exception: return text
 
-def _get_fallback_query_from_ai(original_query: str, errors_list: List[str]) -> Optional[str]:
+def _get_fallback_query(original_query: str) -> Optional[str]:
     if not genai: return None
-    print(f"  🤔 La búsqueda precisa de '{original_query}' falló. Generando una consulta flexible...")
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = f"A search for '{original_query}' yielded no results. Generate a single, slightly broader but still relevant English query that is likely to find similar products. Respond ONLY with the new query."
+        prompt = f"A search for '{original_query}' yielded no results. Generate a single, slightly broader but still relevant English search query that is likely to find similar products. Respond ONLY with the new query."
         response = model.generate_content(prompt)
-        fallback_query = response.text.strip()
-        print(f"  💡 Consulta flexible generada: '{fallback_query}'")
-        return fallback_query
-    except google_exceptions.ResourceExhausted as e:
-        errors_list.append("Advertencia: Cuota de API superada al intentar generar sugerencias.")
+        return response.text.strip()
+    except Exception as e:
+        print(f"  ❌ Error al generar fallback: {e}")
         return None
-    except Exception: return None
 
-def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list: List[str]) -> Dict[str, Any]:
-    default_failure = {"relevance_score": 0, "price_accuracy_score": 0}
-    if not genai or not candidate.get('text_content'): return default_failure
+def _pre_filter_candidates_with_ai(candidates: List[SearchCandidate], original_query: str) -> List[SearchCandidate]:
+    if not genai or not candidates: return []
+    print(f"--- FASE 1.5: Pre-validando {len(candidates)} candidatos con IA (usando snippets)... ---")
     
+    prompt_parts = ["You are an expert filter. For each candidate URL, determine if it is a direct product retail page relevant to the user's search. Answer with a JSON array of objects.\n"]
+    prompt_parts.append(f"USER SEARCH: \"{original_query}\"\n\nCANDIDATES:\n")
+    for i, c in enumerate(candidates):
+        prompt_parts.append(f"{i}: title='{c.title}', snippet='{c.snippet}'\n")
+    
+    prompt_parts.append("\nRESPONSE FORMAT: Return a JSON array where each object has 'index' (int) and 'is_likely_product_page' (boolean).\n")
+    prompt = "".join(prompt_parts)
+
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        results = json.loads(response.text)
+        
+        valid_indices = {res['index'] for res in results if res.get('is_likely_product_page', False)}
+        filtered_candidates = [candidates[i] for i in valid_indices if i < len(candidates)]
+        
+        print(f"  🧠 Pre-validación IA redujo los candidatos de {len(candidates)} a {len(filtered_candidates)}.")
+        return filtered_candidates
+    except Exception as e:
+        print(f"  ❌ Error en pre-validación por IA, continuando sin filtro: {e}")
+        return candidates
+
+def _get_ai_analysis(candidate: Dict[str, Any], original_query: str) -> Optional[Dict[str, Any]]:
+    if not genai or not candidate.get('text_content'): return None
     print(f"  🤖⚖️ Calificando oferta: '{candidate['title']}'...")
     prompt = (
-        f"You are a shopping expert AI. Analyze the product page data and return a JSON object with your ratings.\n\n"
+        f"You are a shopping expert AI. Analyze the product page data and return a JSON object.\n\n"
         f"DATA:\n- User's Search: '{original_query}'\n- Page Title: '{candidate['title']}'\n- Page Text: '{candidate['text_content']}'\n\n"
-        f"TASKS & SCORING:\n"
-        f"1.  **Extract Price & Currency:** Find the main product's price and its 3-letter currency code (e.g., 'USD', 'MXN'). Assume 'USD' if unclear.\n"
-        f"2.  **Relevance Score (1-10):** How closely does this product match the user's search? 10 is perfect. Below 5 is a different product.\n"
-        f"3.  **Price Accuracy Score (1-10):** How confident are you the price is correct for a single unit? 10 is very confident.\n"
-        f"4.  **US Centric Check:** Does this store operate in or ship to the USA? This is critical.\n\n"
-        f"Return a JSON with these keys: `price` (float), `currency` (string), `relevance_score` (int), `price_accuracy_score` (int), `is_usa_centric` (boolean), `reasoning` (string)."
+        f"TASKS:\n"
+        f"1. **Extract Price & Currency:** Find the main product's price and its 3-letter currency code (e.g., 'USD'). Assume 'USD' if unclear.\n"
+        f"2. **Relevance Score (1-10):** How closely does this product match the search?\n"
+        f"3. **Price Accuracy Score (1-10):** How confident are you the price is correct for a single unit?\n"
+        f"4. **US Centric Check:** Does this store operate in/ship to the USA?\n\n"
+        f"Return a JSON with keys: `price` (float), `currency` (string), `relevance_score` (int), `price_accuracy_score` (int), `is_usa_centric` (boolean), `reasoning` (string)."
     )
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         analysis = json.loads(response.text)
-        if not all(k in analysis for k in ["price", "currency", "relevance_score", "price_accuracy_score", "is_usa_centric"]): return default_failure
-        print(f"  🧠 Calificación IA: Relevancia={analysis['relevance_score']}/10, Precisión={analysis['price_accuracy_score']}/10, Precio={analysis['price']} {analysis['currency']}, USA?={analysis['is_usa_centric']}")
+        if not all(k in analysis for k in ["price", "currency", "relevance_score", "price_accuracy_score", "is_usa_centric"]): return None
         return analysis
-    except (json.JSONDecodeError, google_exceptions.ResourceExhausted, ValueError) as e:
-        if isinstance(e, google_exceptions.ResourceExhausted): errors_list.append("Advertencia: Cuota de API superada durante el análisis.")
-        return default_failure
-    except Exception: return default_failure
+    except Exception: return None
 
+# --- CLASE PRINCIPAL DEL BOT ---
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
+        # Configuración centralizada
+        self.HIGH_PRIORITY_STORES = ["amazon.com", "walmart.com", "ebay.com", "target.com", "homedepot.com", "lowes.com", "grainger.com", "uline.com", "zoro.com", "mscdirect.com", "newegg.com", "bhphotovideo.com"]
+        self.BLACKLISTED_DOMAINS = ['pinterest.com', 'youtube.com', 'wikipedia.org', 'facebook.com']
+        self.SEARCH_DEPTH_PAGES = 3
+        self.TOP_N_CANDIDATES_TO_VALIDATE = 50
         self.MAX_RESULTS_TO_RETURN = 30
         self.MINIMUM_RESULTS_TARGET = 10
+        self.RELEVANCE_THRESHOLD = 5
+        self.PRICE_ACCURACY_THRESHOLD = 6
 
-    def _run_single_search_task(self, query: str, engine: str, start: int = 0) -> List[str]:
-        urls = []
+    def _run_search_task(self, query: str, engine: str, start: int = 0) -> List[SearchCandidate]:
+        candidates = []
         params = {"q": query, "engine": engine, "location": "United States", "gl": "us", "hl": "en", "api_key": self.serpapi_key, "start": start}
         if engine == "google": params["num"] = "10"
         try:
-            print(f"  📡 Ejecutando búsqueda: Engine={engine}, Query='{query[:50]}...'")
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
             response.raise_for_status()
             results = response.json().get('organic_results', []) if engine == "google" else response.json().get('shopping_results', [])
             for item in results:
-                if isinstance(item, dict) and item.get('link'): urls.append(item['link'])
+                if isinstance(item, dict) and item.get('link'):
+                    candidates.append(SearchCandidate(url=item['link'], title=item.get('title', ''), snippet=item.get('snippet', '')))
         except Exception as e: print(f"❌ Error en sub-búsqueda ({engine}): {e}")
-        return urls
-    
-    def _process_and_validate_candidates(self, candidate_urls: List[str], original_query: str, errors_list: List[str], is_fallback: bool = False) -> List[ProductResult]:
-        blacklist = ['pinterest.com', 'youtube.com', 'wikipedia.org', 'facebook.com']
-        filtered_urls = list(set([url for url in candidate_urls if not any(site in url for site in blacklist)]))
-        
-        print(f"--- {len(filtered_urls)} URLs candidatas pasarán a la fase de scrape y juicio. ---")
-        if not filtered_urls: return []
+        return candidates
 
-        analyzed_products = []
+    def _collect_candidates(self, base_query: str, original_query: str) -> List[SearchCandidate]:
+        print("--- FASE 1: Recolectando candidatos ---")
+        tasks = []
+        store_query_part = " OR ".join([f"site:{store}" for store in self.HIGH_PRIORITY_STORES])
+        store_query = f"({store_query_part}) \"{original_query}\""
+        tasks.append({"query": store_query, "engine": "google", "start": 0})
+        for i in range(self.SEARCH_DEPTH_PAGES): tasks.append({"query": base_query, "engine": "google", "start": i * 10})
+        tasks.append({"query": base_query, "engine": "google_shopping", "start": 0})
+
+        all_candidates = []
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(self._run_search_task, **task) for task in tasks]
+            for future in as_completed(futures):
+                all_candidates.extend(future.result())
+        
+        seen_urls = set()
+        unique_candidates = [p for p in all_candidates if p.url not in seen_urls and not seen_urls.add(p.url)]
+        return unique_candidates
+
+    def _scrape_and_validate_candidates(self, candidate_urls: List[SearchCandidate], original_query: str, errors_list: List[str], is_fallback: bool = False) -> List[ProductResult]:
+        if not candidate_urls: return []
+        print(f"--- FASE 2: Scrape y Juicio Final de {len(candidate_urls)} candidatos pre-validados. ---")
+        
+        final_products = []
         with ThreadPoolExecutor(max_workers=10) as executor:
-            scraped_candidates = list(executor.map(_deep_scrape_content, filtered_urls))
+            scraped_candidates = list(executor.map(_deep_scrape_content, [c.url for c in candidate_urls]))
             candidates_for_judgement = [c for c in scraped_candidates if c['text_content'] and len(c['text_content']) > 50]
-            print(f"--- FASE 2: Sometiendo a juicio de IA a {len(candidates_for_judgement)} candidatos. ---")
             
             future_to_candidate = {executor.submit(_get_ai_analysis, c, original_query, errors_list): c for c in candidates_for_judgement}
             for future in as_completed(future_to_candidate):
                 candidate_data, analysis = future_to_candidate[future], future.result()
-                if analysis.get('is_usa_centric', False) and analysis.get('relevance_score', 0) >= 5 and analysis.get('price_accuracy_score', 0) >= 5:
+                if analysis and analysis.get('is_usa_centric', False) and analysis.get('relevance_score', 0) >= self.RELEVANCE_THRESHOLD and analysis.get('price_accuracy_score', 0) >= self.PRICE_ACCURACY_THRESHOLD:
                     currency = analysis.get('currency', 'USD').upper(); rate = CURRENCY_RATES_TO_USD.get(currency)
                     if rate:
                         original_price = float(analysis.get('price', 99999)); price_in_usd = original_price * rate
                         if price_in_usd >= 0.50:
-                            analyzed_products.append(ProductResult(
+                            final_products.append(ProductResult(
                                 name=candidate_data['title'], store=urlparse(candidate_data['url']).netloc.replace('www.', '').split('.')[0].capitalize(),
                                 url=candidate_data['url'], image_url=candidate_data['image'],
                                 price_in_usd=price_in_usd, original_price=original_price, original_currency=currency,
-                                relevance_score=analysis['relevance_score'], price_accuracy_score=analysis['price_accuracy_score'], 
+                                relevance_score=analysis['relevance_score'], price_accuracy_score=analysis['price_accuracy_score'],
                                 reasoning=analysis.get('reasoning', ''), is_alternative_suggestion=is_fallback
                             ))
-        return analyzed_products
+        return final_products
 
-    def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str], List[str]]:
+    def search(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str]]:
         errors_list = []
         try:
             original_query = query.strip() if query else "product from image"
-            if not original_query: return [], [], []
+            if not original_query: return [], ["Por favor, introduce un término de búsqueda."]
 
-            enhanced_query = _enhance_query_for_purchase(original_query, errors_list)
-            if not enhanced_query: return [], ["No se pudo generar una consulta válida."], errors_list
+            enhanced_query = _enhance_query(original_query)
+            if not enhanced_query: return [], ["No se pudo generar una consulta válida."]
             
-            # --- BÚSQUEDA SECUENCIAL Y PRIORIZADA ---
-            all_urls = set()
-            
-            # Intento 1: Google Shopping (La mejor fuente)
-            print("--- Iniciando Búsqueda Priorizada: Google Shopping ---")
-            urls = self._run_single_search_task(enhanced_query, "google_shopping")
-            for url in urls: all_urls.add(url)
-            
-            final_results = self._process_and_validate_candidates(list(all_urls), original_query, errors_list)
+            candidates = self._collect_candidates(enhanced_query, original_query)
+            pre_filtered_candidates = _pre_filter_candidates_with_ai(candidates, original_query)
+            final_results = self._scrape_and_validate_candidates(pre_filtered_candidates, original_query, errors_list)
 
-            # Si no tenemos suficientes resultados, expandimos la búsqueda
-            if len(final_results) < self.MINIMUM_RESULTS_TARGET:
-                print(f"--- Menos de {self.MINIMUM_RESULTS_TARGET} resultados. Expandiendo búsqueda... ---")
-                
-                # Búsqueda Orgánica
-                for i in range(2): # 2 páginas
-                    urls = self._run_single_search_task(enhanced_query, "google", start=i * 10)
-                    for url in urls: all_urls.add(url)
-
-                # Búsqueda Consolidada en Tiendas
-                high_priority_stores = ["amazon.com", "walmart.com", "ebay.com", "target.com", "homedepot.com", "lowes.com"]
-                store_query_part = " OR ".join([f"site:{store}" for store in high_priority_stores])
-                store_query = f"({store_query_part}) \"{original_query}\""
-                urls = self._run_single_search_task(store_query, "google")
-                for url in urls: all_urls.add(url)
-                
-                final_results = self._process_and_validate_candidates(list(all_urls), original_query, errors_list)
-
-            # --- INTENTO FINAL: BÚSQUEDA FLEXIBLE (FALLBACK) ---
             if not final_results:
                 print("--- Búsqueda principal sin resultados. Iniciando Búsqueda Flexible. ---")
-                fallback_query = _get_fallback_query_from_ai(original_query, errors_list)
+                fallback_query = _get_fallback_query(original_query)
                 if fallback_query:
-                    fallback_urls = self._run_single_search_task(fallback_query, "google_shopping")
-                    final_results = self._process_and_validate_candidates(fallback_urls, original_query, errors_list, is_fallback=True)
+                    fb_candidates = self._collect_candidates(fallback_query, fallback_query)
+                    fb_pre_filtered = _pre_filter_candidates_with_ai(fb_candidates, original_query)
+                    final_results = self._scrape_and_validate_candidates(fb_pre_filtered, original_query, errors_list, is_fallback=True)
                     if final_results:
-                        errors_list.insert(0, "No encontramos resultados exactos. Pero aquí hay algunas opciones similares que podrían interesarte.")
+                        errors_list.insert(0, "No encontramos resultados exactos, pero aquí hay algunas opciones similares.")
 
-            if not final_results: 
+            if not final_results:
                 print("✅ BÚSQUEDA COMPLETA. No se encontraron ofertas de alta calidad.")
-                return [], [], errors_list
-            
-            final_results = sorted(final_results, key=lambda p: p.price_in_usd)
-            
+                return [], errors_list
+
+            final_results.sort(key=lambda p: p.price_in_usd)
             print(f"✅ BÚSQUEDA COMPLETA. Se encontraron {len(final_results)} ofertas de calidad.")
-            return final_results[:self.MAX_RESULTS_TO_RETURN], [], errors_list
+            return final_results[:self.MAX_RESULTS_TO_RETURN], errors_list
 
         except Exception as e:
-            print(f"‼️ ERROR CRÍTICO NO MANEJADO EN search_product: {e}")
-            traceback.print_exc()
-            errors_list.append("Ocurrió un error inesperado en el servidor.")
-            return [], [], errors_list
+            print(f"‼️ ERROR CRÍTICO NO MANEJADO EN search: {e}"); traceback.print_exc()
+            return [], ["Ocurrió un error inesperado en el servidor."]
 
 # ==============================================================================
 # SECCIÓN 3: RUTAS FLASK Y EJECUCIÓN
 # ==============================================================================
-shopping_bot = SmartShoppingBot(SERPAPI_KEY)
+shopping_bot = SmartShoppingBot(serpapi_key=SERPAPI_KEY)
 
 @app.route('/')
 def index():
@@ -264,7 +283,7 @@ def login():
     try:
         response = requests.post(rest_api_url, json=payload); response.raise_for_status()
         user_data = response.json()
-        session['user_id'] = user_data['localId']; session['user_name'] = user_data.get('displayName', email); session['id_token'] = user_data['idToken']
+        session['user_id'] = user_data['localId']; session['user_name'] = user_data.get('displayName', email)
         flash('¡Has iniciado sesión correctamente!', 'success'); return redirect(url_for('main_app_page'))
     except requests.exceptions.HTTPError as e:
         error_message = e.response.json().get('error', {}).get('message', 'ERROR')
@@ -284,11 +303,9 @@ def main_app_page():
 def api_search():
     if 'user_id' not in session: return jsonify({'error': 'No autorizado'}), 401
     query = request.form.get('query')
-    image_file = request.files.get('image_file')
-    image_content = image_file.read() if image_file and image_file.filename != '' else None
-    results, _, errors = shopping_bot.search_product(query=query, image_content=image_content)
+    results, errors = shopping_bot.search(query=query) 
     results_dicts = [res.__dict__ for res in results]
-    return jsonify(results=results_dicts, suggestions=[], errors=errors)
+    return jsonify(results=results_dicts, errors=errors)
 
 # ==============================================================================
 # SECCIÓN 4: PLANTILLAS HTML Y EJECUCIÓN
@@ -323,7 +340,6 @@ SEARCH_TEMPLATE = """
         }).then(response => response.json()).then(data => {
             loadingDiv.style.display = "none";
 
-            // Lógica para mostrar mensaje de búsqueda flexible
             let isAlternative = data.results.length > 0 && data.results[0].is_alternative_suggestion;
             if (data.errors && data.errors.length > 0) {
                 let errorHTML = '<ul>';
@@ -334,22 +350,19 @@ SEARCH_TEMPLATE = """
                 resultsTitle.style.display = "none";
             }
             
-            if (isAlternative) {
-                resultsTitle.innerText = "No encontramos resultados exactos, pero aquí hay algunas opciones similares:";
-            } else {
-                resultsTitle.innerText = "Las Mejores Ofertas Encontradas";
-            }
+            resultsTitle.innerText = isAlternative ? "No encontramos resultados exactos, pero aquí hay algunas opciones similares:" : "Las Mejores Ofertas Encontradas";
 
             if (data.results && data.results.length > 0) {
                 resultsTitle.style.display = "block";
                 data.results.forEach(product => {
                     const reasoning = product.reasoning.replace(/"/g, '"');
                     const originalPrice = `${product.original_price.toFixed(2)} ${product.original_currency}`;
+                    const dealScore = product.deal_score ? product.deal_score.toFixed(2) : 'N/A';
                     productsGrid.innerHTML += `
                         <div class="product-card">
                             <div class="product-image"><img src="${product.image_url || 'https://via.placeholder.com/300'}" alt="${product.name}" onerror="this.onerror=null;this.src='https://via.placeholder.com/300';"></div>
                             <div class="product-info">
-                                <div class="product-title" title="IA Reasoning: ${reasoning}">${product.name}</div>
+                                <div class="product-title" title="Deal Score: ${dealScore}\\nIA Reasoning: ${reasoning}">${product.name}</div>
                                 <div class="price-store-wrapper">
                                     <div class="current-price" title="Original: ${originalPrice}">$${product.price_in_usd.toFixed(2)}</div>
                                     <div class="store-link"><a href="${product.url}" target="_blank">Ver en ${product.store}</a></div>
