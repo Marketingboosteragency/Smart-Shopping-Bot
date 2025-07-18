@@ -5,6 +5,7 @@
 # Versión: 20.0 (Price-First Engine)
 # Novedades:
 # - ORDENACIÓN DIRECTA POR PRECIO: Se elimina el complejo 'Deal Score'. Los resultados ahora se ordenan estrictamente por precio (del más barato al más caro).
+# - BÚSQUEDA MULTI-TIENDA AMPLIADA: Se han añadido más tiendas prioritarias como Walmart, Target y Best Buy a la búsqueda exhaustiva.
 # - AUMENTO DE LA CANTIDAD DE RESULTADOS: Se ha incrementado el número de candidatos a validar y el máximo de resultados a mostrar para obtener listas más completas.
 # - FILTRO GEOGRÁFICO DE EE.UU. MANTENIDO: El filtro que asegura que los resultados sean de Estados Unidos sigue siendo una prioridad estricta.
 # ==============================================================================
@@ -122,8 +123,8 @@ class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
         # MODIFICACIÓN: Aumentar la cantidad de resultados
-        self.TOP_N_CANDIDATES_TO_VALIDATE = 35
-        self.MAX_RESULTS_TO_RETURN = 25
+        self.TOP_N_CANDIDATES_TO_VALIDATE = 40
+        self.MAX_RESULTS_TO_RETURN = 30
 
     def _run_search_task(self, query: str, engine: str, start: int = 0) -> List[str]:
         urls = []
@@ -141,7 +142,8 @@ class SmartShoppingBot:
     def get_candidate_urls_exhaustively(self, base_query: str, original_query: str) -> List[str]:
         print("--- FASE 1: Iniciando Búsqueda Exhaustiva de Candidatos ---")
         tasks = []
-        high_priority_stores = ["homedepot.com", "lowes.com", "grainger.com", "uline.com", "lumberliquidators.com", "amazon.com", "walmart.com", "ebay.com", "zoro.com"]
+        # MODIFICACIÓN: Añadir más tiendas a la búsqueda dirigida
+        high_priority_stores = ["amazon.com", "walmart.com", "ebay.com", "target.com", "bestbuy.com", "homedepot.com", "lowes.com", "grainger.com", "uline.com", "zoro.com"]
         
         # MODIFICACIÓN: Aumentar la profundidad de búsqueda a 3 páginas
         for i in range(3): tasks.append({"query": base_query, "engine": "google", "start": i * 10})
