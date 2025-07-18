@@ -1,13 +1,13 @@
-# app.py (versión 16.0 - Motor de Búsqueda Exhaustiva)
+# app.py (versión 17.0 - Motor de Caza de Ofertas)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 16.0 (Exhaustive Search Engine)
+# Versión: 17.0 (Price Hunter Engine)
 # Novedades:
-# - BÚSQUEDA DIRIGIDA A TIENDAS: Se añade una lista de tiendas de alta prioridad para realizar búsquedas específicas dentro de sus sitios (ej. `site:homedepot.com`).
-# - BÚSQUEDA ORGÁNICA PROFUNDA: La recolección ahora analiza las primeras 2 páginas de resultados de Google, duplicando la profundidad de la búsqueda.
-# - CONSULTA DE "ÚLTIMO RECURSO": Se añade una consulta genérica para capturar resultados que las búsquedas comerciales más específicas podrían omitir.
-# - ARQUITECTURA ROBUSTA: Se mantiene el motor de autoridad de precios y la estructura de archivo único a prueba de errores.
+# - ARQUITECTURA DE PUNTUACIÓN DE OFERTAS: La IA ya no valida con SÍ/NO, sino que califica la relevancia y la precisión del precio en una escala de 1 a 10.
+# - ALGORITMO DE "DEAL SCORE": Un nuevo algoritmo ponderado calcula la "puntuación de oferta" de cada producto, penalizando fuertemente los precios altos para priorizar las gangas.
+# - FILTRO GEOGRÁFICO INTELIGENTE: La IA ahora verifica si la tienda es relevante para los Estados Unidos, cumpliendo con la solicitud del usuario.
+# - ORDENACIÓN POR VALOR: Los resultados se ordenan por la mejor "puntuación de oferta", no solo por el precio más bajo, garantizando un equilibrio entre relevancia y costo.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -16,8 +16,9 @@ import re
 import json
 import os
 import io
+import statistics
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlparse, urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from fake_useragent import UserAgent
@@ -56,9 +57,10 @@ if genai and GEMINI_API_KEY:
 
 @dataclass
 class ProductResult:
-    name: str; price_in_usd: float; store: str; url: str
-    image_url: str = ""; original_price: float = 0.0; original_currency: str = "USD"
-    is_validated: bool = False; relevance_reasoning: str = ""; confidence_score: float = 0.0
+    name: str; store: str; url: str; image_url: str = ""
+    price_in_usd: float = 0.0; original_price: float = 0.0; original_currency: str = "USD"
+    relevance_score: int = 0; price_accuracy_score: int = 0; deal_score: float = 0.0
+    reasoning: str = ""
 
 CURRENCY_RATES_TO_USD = {"USD": 1.0, "DOP": 0.017, "MXN": 0.054, "CAD": 0.73, "EUR": 1.08, "GBP": 1.27}
 
@@ -71,143 +73,127 @@ def _deep_scrape_content(url: str) -> Dict[str, Any]:
         image_url = (og.get("content") for og in [soup.find("meta", property="og:image")] if og)
         image_url = urljoin(url, next(image_url, ''))
         title = soup.title.string.strip() if soup.title else 'No Title'
-        text_content = ' '.join(soup.stripped_strings)[:1500]
+        text_content = ' '.join(soup.stripped_strings)[:2000] # Captura más texto
         return {'title': title, 'image': image_url, 'text_content': text_content, 'url': url}
     except Exception:
         return {'title': 'N/A', 'image': '', 'text_content': '', 'url': url}
 
-def _enhance_query_for_purchase(text: str, errors_list: List[str]) -> str:
-    if not genai or not text: return text
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = f"Enhance and translate this user's search query into a specific, detailed English query for finding a product online. Query: '{text}'. Respond ONLY with the enhanced query."
-        response = model.generate_content(prompt)
-        enhanced_query = response.text.strip()
-        print(f"  🧠 Consulta mejorada por IA: de '{text}' a '{enhanced_query}'.")
-        return enhanced_query
-    except google_exceptions.ResourceExhausted as e:
-        errors_list.append("Advertencia: Cuota de API superada para mejorar la consulta.")
-        return text
-    except Exception: return text
-
-def _get_price_and_relevance_from_ai(candidate: Dict[str, Any], original_query: str, errors_list: List[str]) -> Dict[str, Any]:
-    default_failure = {"is_highly_relevant": False, "confidence_score": 0.0}
+def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list: List[str]) -> Dict[str, Any]:
+    default_failure = {"relevance_score": 0, "price_accuracy_score": 0}
     if not genai or not candidate.get('text_content'): return default_failure
-    print(f"  🤖⚖️ Sometiendo a juicio de IA: '{candidate['title']}'...")
+    
+    print(f"  🤖⚖️ Calificando oferta: '{candidate['title']}'...")
     prompt = (
-        f"You are a precise data extraction AI. Analyze the following data and return a JSON object.\n\n"
-        f"DATA:\n- User's Search: '{original_query}'\n- Page Title: '{candidate['title']}'\n- Page Text Snippet: '{candidate['text_content']}'\n\n"
-        f"TASKS:\n1. **Extract Price & Currency:** Find the main product's price. Identify its 3-letter currency code (e.g., 'USD', 'MXN', 'DOP'). Assume 'USD' if unclear.\n"
-        f"2. **Check Relevance:** Is the product a direct, relevant answer to the user's search?\n\n"
-        f"Provide your analysis in a JSON object with these exact keys: `is_highly_relevant` (boolean), `price` (float), `currency` (string), `confidence_score` (float from 0.0 to 1.0), `reasoning` (string)."
+        f"You are a shopping expert AI. Analyze the product page data and return a JSON object with your ratings.\n\n"
+        f"DATA:\n- User's Search: '{original_query}'\n- Page Title: '{candidate['title']}'\n- Page Text: '{candidate['text_content']}'\n\n"
+        f"TASKS & SCORING:\n"
+        f"1.  **Extract Price & Currency:** Find the main product's price and its 3-letter currency code (e.g., 'USD', 'MXN'). Assume 'USD' if unclear.\n"
+        f"2.  **Relevance Score (1-10):** How closely does this product match the user's search? 10 is a perfect match. Below 5 is a different product.\n"
+        f"3.  **Price Accuracy Score (1-10):** How confident are you that the price you found is the primary, correct price for a single unit of the main item? 10 is very confident.\n"
+        f"4.  **US Centric Check:** Does this store seem to operate in or ship to the United States?\n\n"
+        f"Return a JSON with these keys: `price` (float), `currency` (string), `relevance_score` (int), `price_accuracy_score` (int), `is_usa_centric` (boolean), `reasoning` (string)."
     )
+    
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        response = model.generate_content(prompt)
-        cleaned_response = response.text.strip().replace("```json", "").replace("```", "")
-        analysis = json.loads(cleaned_response)
-        if not all(k in analysis for k in ["is_highly_relevant", "price", "currency", "confidence_score", "reasoning"]): return default_failure
-        print(f"  🧠 Juicio de IA: Relevante={analysis['is_highly_relevant']}, Precio={analysis['price']} {analysis['currency']}, Confianza={analysis['confidence_score']:.2f}")
+        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        analysis = json.loads(response.text)
+        if not all(k in analysis for k in ["price", "currency", "relevance_score", "price_accuracy_score", "is_usa_centric"]):
+            return default_failure
+        print(f"  🧠 Calificación IA: Relevancia={analysis['relevance_score']}/10, Precisión Precio={analysis['price_accuracy_score']}/10, Precio={analysis['price']} {analysis['currency']}")
         return analysis
-    except (json.JSONDecodeError, google_exceptions.ResourceExhausted) as e:
+    except (json.JSONDecodeError, google_exceptions.ResourceExhausted, ValueError) as e:
         if isinstance(e, google_exceptions.ResourceExhausted):
-            errors_list.append("Advertencia: Cuota de API superada durante el juicio de IA.")
+            errors_list.append("Advertencia: Cuota de API superada durante el análisis de ofertas.")
         return default_failure
     except Exception: return default_failure
 
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
-        self.CONFIDENCE_THRESHOLD = 0.75
-        self.HIGH_PRIORITY_STORES = [
-            "homedepot.com", "lowes.com", "grainger.com", "uline.com", 
-            "mcmaster.com", "harborfreight.com", "lumberliquidators.com"
-        ]
 
     def _run_search_task(self, query: str, engine: str, start: int = 0) -> List[str]:
-        """Ejecuta una única tarea de búsqueda y devuelve una lista de URLs."""
         urls = []
         params = {"q": query, "engine": engine, "location": "United States", "gl": "us", "hl": "en", "api_key": self.serpapi_key, "start": start}
-        if engine == "google": params["num"] = "10" # 10 resultados por página
+        if engine == "google": params["num"] = "10"
         try:
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
             response.raise_for_status()
             results = response.json().get('organic_results', []) if engine == "google" else response.json().get('shopping_results', [])
             for item in results:
                 if isinstance(item, dict) and item.get('link'): urls.append(item['link'])
-        except Exception as e:
-            print(f"❌ Error en sub-búsqueda ({engine}, q={query[:30]}...): {e}")
+        except Exception as e: print(f"❌ Error en sub-búsqueda ({engine}): {e}")
         return urls
 
     def get_candidate_urls_exhaustively(self, base_query: str, original_query: str) -> List[str]:
         print("--- FASE 1: Iniciando Búsqueda Exhaustiva de Candidatos ---")
         tasks = []
+        high_priority_stores = ["homedepot.com", "lowes.com", "grainger.com", "uline.com", "lumberliquidators.com", "amazon.com"]
         
-        # 1. Búsqueda Orgánica Profunda (2 páginas)
-        for i in range(2): # 0 para la primera página, 10 para la segunda
-            tasks.append({"query": base_query, "engine": "google", "start": i * 10})
-        
-        # 2. Búsqueda en Google Shopping
+        # Búsqueda Orgánica Profunda (3 páginas)
+        for i in range(3): tasks.append({"query": base_query, "engine": "google", "start": i * 10})
         tasks.append({"query": base_query, "engine": "google_shopping", "start": 0})
-        
-        # 3. Búsqueda Dirigida a Tiendas de Alta Prioridad
-        for store in self.HIGH_PRIORITY_STORES:
-            tasks.append({"query": f'site:{store} "{original_query}"', "engine": "google", "start": 0})
-            
-        # 4. Consulta de "Último Recurso"
-        tasks.append({"query": f'"{original_query}"', "engine": "google", "start": 0})
+        for store in high_priority_stores: tasks.append({"query": f'site:{store} "{original_query}"', "engine": "google", "start": 0})
+        tasks.append({"query": f'"{original_query}" cheap', "engine": "google", "start": 0})
 
         print(f"  🔥 Ejecutando {len(tasks)} tareas de búsqueda en paralelo...")
         all_urls = set()
         with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_task = {executor.submit(self._run_search_task, **task): task for task in tasks}
             for future in as_completed(future_to_task):
-                urls_from_task = future.result()
-                for url in urls_from_task:
-                    all_urls.add(url)
-        
+                for url in future.result(): all_urls.add(url)
         return list(all_urls)
 
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str], List[str]]:
         errors_list = []
         original_query = query.strip() if query else "product from image"
-        if not original_query: return [], ["Por favor, introduce un texto o sube una imagen."], []
+        if not original_query: return [], [], []
 
         enhanced_query = _enhance_query_for_purchase(original_query, errors_list)
-        if not enhanced_query: return [], ["No se pudo generar una consulta válida."], errors_list
+        if not enhanced_query: return [], [], errors_list
         
         candidate_urls = self.get_candidate_urls_exhaustively(enhanced_query, original_query)
-        blacklist = ['pinterest.com', 'youtube.com', 'wikipedia.org', 'facebook.com', 'twitter.com', 'yelp.com']
+        blacklist = ['pinterest.com', 'youtube.com', 'wikipedia.org', 'facebook.com']
         filtered_urls = [url for url in candidate_urls if not any(site in url for site in blacklist)]
         
-        print(f"--- {len(filtered_urls)} URLs candidatas únicas pasarán a la fase de scrape y juicio. ---")
+        print(f"--- {len(filtered_urls)} URLs candidatas pasarán a la fase de scrape y juicio. ---")
         if not filtered_urls: return [], [], errors_list
 
-        validated_products = []
+        analyzed_products = []
         with ThreadPoolExecutor(max_workers=10) as executor:
             scraped_candidates = [r for r in executor.map(_deep_scrape_content, filtered_urls)]
             candidates_for_judgement = [c for c in scraped_candidates if c['text_content']]
             print(f"--- FASE 2: Sometiendo a juicio de IA a {len(candidates_for_judgement)} candidatos. ---")
             
-            future_to_candidate = {executor.submit(_get_price_and_relevance_from_ai, c, original_query, errors_list): c for c in candidates_for_judgement}
+            future_to_candidate = {executor.submit(_get_ai_analysis, c, original_query, errors_list): c for c in candidates_for_judgement}
             for future in as_completed(future_to_candidate):
                 candidate_data, analysis = future_to_candidate[future], future.result()
-                try:
-                    if analysis['is_highly_relevant'] and analysis.get('confidence_score', 0) >= self.CONFIDENCE_THRESHOLD:
-                        currency = analysis.get('currency', 'USD').upper(); rate = CURRENCY_RATES_TO_USD.get(currency)
-                        if rate:
-                            original_price = float(analysis['price']); price_in_usd = original_price * rate
-                            if price_in_usd >= 0.50:
-                                validated_products.append(ProductResult(
-                                    name=candidate_data['title'], price_in_usd=price_in_usd, store=urlparse(candidate_data['url']).netloc.replace('www.', '').split('.')[0].capitalize(),
-                                    url=candidate_data['url'], image_url=candidate_data['image'], original_price=original_price, original_currency=currency,
-                                    relevance_reasoning=analysis['reasoning'], confidence_score=analysis['confidence_score'], is_validated=True))
-                except Exception as e: print(f"  ❌ Error procesando juicio para {candidate_data['title']}: {e}")
+                if analysis.get('relevance_score', 0) >= 5 and analysis.get('price_accuracy_score', 0) >= 5 and analysis.get('is_usa_centric', False):
+                    currency = analysis.get('currency', 'USD').upper(); rate = CURRENCY_RATES_TO_USD.get(currency)
+                    if rate:
+                        original_price = float(analysis['price']); price_in_usd = original_price * rate
+                        if price_in_usd >= 0.50:
+                            analyzed_products.append(ProductResult(
+                                name=candidate_data['title'], store=urlparse(candidate_data['url']).netloc.replace('www.', '').split('.')[0].capitalize(),
+                                url=candidate_data['url'], image_url=candidate_data['image'],
+                                price_in_usd=price_in_usd, original_price=original_price, original_currency=currency,
+                                relevance_score=analysis['relevance_score'], price_accuracy_score=analysis['price_accuracy_score'], reasoning=analysis.get('reasoning', '')
+                            ))
         
-        if not validated_products: return [], [], errors_list
+        if not analyzed_products: return [], [], errors_list
             
-        final_results = sorted(validated_products, key=lambda x: x.price_in_usd)
-        print(f"✅ BÚSQUEDA COMPLETA. Se encontraron {len(final_results)} resultados verificados.")
+        # --- FASE 3: CALCULAR "DEAL SCORE" Y ORDENAR ---
+        prices = [p.price_in_usd for p in analyzed_products]
+        min_price, max_price = min(prices), max(prices)
+        
+        for p in analyzed_products:
+            price_range = max_price - min_price
+            normalized_price = (p.price_in_usd - min_price) / price_range if price_range > 0 else 0
+            price_penalty = normalized_price * 5 # Penalización fuerte por precio alto
+            p.deal_score = (p.relevance_score * 3) + (p.price_accuracy_score * 2) - price_penalty
+            
+        final_results = sorted(analyzed_products, key=lambda p: p.deal_score, reverse=True)
+        print(f"✅ BÚSQUEDA COMPLETA. Se encontraron {len(final_results)} ofertas de calidad.")
         return final_results, [], errors_list
 
 # ==============================================================================
@@ -222,17 +208,17 @@ def index():
 
 @app.route('/login', methods=['POST'])
 def login():
-    if not FIREBASE_WEB_API_KEY: flash('Servicio de autenticación no configurado.', 'danger'); return redirect(url_for('index'))
+    if not FIREBASE_WEB_API_KEY: flash('Servicio no configurado.', 'danger'); return redirect(url_for('index'))
     email, password = request.form.get('email'), request.form.get('password')
     rest_api_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={FIREBASE_WEB_API_KEY}"
     payload = {'email': email, 'password': password, 'returnSecureToken': True}
     try:
         response = requests.post(rest_api_url, json=payload); response.raise_for_status()
         user_data = response.json()
-        session['user_id'] = user_data['localId']; session['user_name'] = user_data.get('displayName', email); session['id_token'] = user_data['idToken']
+        session['user_id'] = user_data['localId']; session['user_name'] = user_data.get('displayName', email)
         flash('¡Has iniciado sesión correctamente!', 'success'); return redirect(url_for('main_app_page'))
     except requests.exceptions.HTTPError as e:
-        error_message = e.response.json().get('error', {}).get('message', 'ERROR_DESCONOCIDO')
+        error_message = e.response.json().get('error', {}).get('message', 'ERROR')
         flash('Correo o contraseña incorrectos.' if 'INVALID' in error_message else f'Error: {error_message}', 'danger'); return redirect(url_for('index'))
     except Exception as e: flash(f'Ocurrió un error inesperado: {e}', 'danger'); return redirect(url_for('index'))
 
@@ -251,9 +237,9 @@ def api_search():
     query = request.form.get('query')
     image_file = request.files.get('image_file')
     image_content = image_file.read() if image_file and image_file.filename != '' else None
-    results, suggestions, errors = shopping_bot.search_product(query=query, image_content=image_content)
+    results, _, errors = shopping_bot.search_product(query=query, image_content=image_content)
     results_dicts = [res.__dict__ for res in results]
-    return jsonify(results=results_dicts, suggestions=suggestions, errors=errors)
+    return jsonify(results=results_dicts, suggestions=[], errors=errors)
 
 # ==============================================================================
 # SECCIÓN 4: PLANTILLAS HTML Y EJECUCIÓN
@@ -263,7 +249,7 @@ AUTH_TEMPLATE_LOGIN_ONLY = """
 """
 
 SEARCH_TEMPLATE = """
-<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Smart Shopping Bot - Comparador de Precios</title><link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet"><style>:root{--primary-color:#4A90E2;--secondary-color:#50E3C2;--accent-color:#FF6B6B;--text-color-dark:#2C3E50;--text-color-light:#ECF0F1;--bg-light:#F8F9FA;--card-bg:#FFFFFF;--shadow-light:rgba(0,0,0,0.08);--shadow-medium:rgba(0,0,0,0.15)}body{font-family:'Poppins',sans-serif;background:var(--bg-light);min-height:100vh;padding:20px;color:var(--text-color-dark)}.container{max-width:1400px;width:100%;margin:0 auto;background:var(--card-bg);border-radius:20px;box-shadow:0 25px 50px var(--shadow-light);overflow:hidden}.header{background:linear-gradient(45deg,var(--text-color-dark),var(--primary-color));color:var(--text-color-light);padding:40px;text-align:center}.header h1{font-size:2.5em;margin-bottom:10px}.header p{font-size:1.1em;opacity:.9}.header a{color:var(--secondary-color);text-decoration:none;font-weight:600}.search-section{padding:50px;background:var(--bg-light);border-bottom:1px solid #e0e0e0}.search-form{display:flex;flex-direction:column;gap:25px;max-width:700px;margin:0 auto}.input-group{display:flex;flex-direction:column;gap:12px}.input-group label{font-weight:600;font-size:1.1em}.input-group input{padding:18px 20px;border:2px solid #e0e0e0;border-radius:12px;font-size:17px}.search-btn{background:linear-gradient(45deg,var(--primary-color),#2980b9);color:#fff;border:none;padding:18px 35px;font-size:1.2em;font-weight:600;border-radius:12px;cursor:pointer}.loading{text-align:center;padding:60px;display:none}.loading p{font-weight:600;color:var(--primary-color)}.spinner{border:5px solid rgba(74,144,226,.2);border-top:5px solid var(--primary-color);border-radius:50%;width:60px;height:60px;animation:spin 1s linear infinite;margin:0 auto 30px}@keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}.results-section{padding:50px;display:none}.api-errors{background-color:#fff3cd;color:#856404;padding:20px;border-radius:12px;margin-bottom:30px;text-align:left;border:1px solid #ffeeba}.api-errors ul{padding-left:20px;margin:0}.products-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:30px;margin-top:40px}.product-card{background:var(--card-bg);border-radius:18px;box-shadow:0 12px 30px var(--shadow-light);overflow:hidden;border:1px solid #eee;display:flex;flex-direction:column;position:relative}.product-image{width:100%;height:220px;display:flex;align-items:center;justify-content:center;overflow:hidden}.product-image img{width:100%;height:100%;object-fit:cover}.product-info{padding:25px;display:flex;flex-direction:column;flex-grow:1;justify-content:space-between}.product-title{font-size:1.1em;font-weight:600;margin-bottom:12px;color:var(--text-color-dark)}.price-store-wrapper{display:flex;justify-content:space-between;align-items:center;margin-top:auto}.current-price{font-size:1.8em;font-weight:700;color:var(--accent-color)}.store-link a{font-weight:600;color:var(--primary-color);text-decoration:none}#image-preview-container{display:none;align-items:center;gap:20px;margin-top:20px}#image-preview{max-height:100px;border-radius:10px}#remove-image-btn{background:var(--accent-color);color:#fff;border:none;border-radius:50%;width:35px;height:35px;cursor:pointer}</style></head><body><div class="container"><header class="header"><h1>Smart Shopping Bot</h1><p>Hola, <strong>{{ user_name }}</strong>. Encuentra los mejores precios online. | <a href="{{ url_for('logout') }}">Cerrar Sesión</a></p></header><section class="search-section"><form id="search-form" class="search-form"><div class="input-group"><label for="query">¿Qué producto buscas?</label><input type="text" id="query" name="query" placeholder="Ej: cinta de pintor azul 2 pulgadas"></div><div class="input-group"><label for="image_file">... o sube una imagen para una búsqueda más precisa</label><input type="file" id="image_file" name="image_file" accept="image/*"><div id="image-preview-container"><img id="image-preview" src="#" alt="Previsualización"><button type="button" id="remove-image-btn" title="Eliminar imagen">×</button></div></div><button type="submit" id="search-btn" class="search-btn">Buscar Precios</button></form></section><div id="loading" class="loading"><div class="spinner"></div><p>Ejecutando motor de búsqueda exhaustiva...</p></div><section id="results-section" class="results-section"><div id="api-errors" class="api-errors" style="display:none;"></div><h2 id="results-title">Resultados de Alta Precisión Verificados por IA</h2><div id="products-grid" class="products-grid"></div></section></div>
+<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Smart Shopping Bot - Comparador de Precios</title><link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet"><style>:root{--primary-color:#4A90E2;--secondary-color:#50E3C2;--accent-color:#FF6B6B;--text-color-dark:#2C3E50;--text-color-light:#ECF0F1;--bg-light:#F8F9FA;--card-bg:#FFFFFF;--shadow-light:rgba(0,0,0,0.08);--shadow-medium:rgba(0,0,0,0.15)}body{font-family:'Poppins',sans-serif;background:var(--bg-light);min-height:100vh;padding:20px;color:var(--text-color-dark)}.container{max-width:1400px;width:100%;margin:0 auto;background:var(--card-bg);border-radius:20px;box-shadow:0 25px 50px var(--shadow-light);overflow:hidden}.header{background:linear-gradient(45deg,var(--text-color-dark),var(--primary-color));color:var(--text-color-light);padding:40px;text-align:center}.header h1{font-size:2.5em;margin-bottom:10px}.header p{font-size:1.1em;opacity:.9}.header a{color:var(--secondary-color);text-decoration:none;font-weight:600}.search-section{padding:50px;background:var(--bg-light);border-bottom:1px solid #e0e0e0}.search-form{display:flex;flex-direction:column;gap:25px;max-width:700px;margin:0 auto}.input-group{display:flex;flex-direction:column;gap:12px}.input-group label{font-weight:600;font-size:1.1em}.input-group input{padding:18px 20px;border:2px solid #e0e0e0;border-radius:12px;font-size:17px}.search-btn{background:linear-gradient(45deg,var(--primary-color),#2980b9);color:#fff;border:none;padding:18px 35px;font-size:1.2em;font-weight:600;border-radius:12px;cursor:pointer}.loading{text-align:center;padding:60px;display:none}.loading p{font-weight:600;color:var(--primary-color)}.spinner{border:5px solid rgba(74,144,226,.2);border-top:5px solid var(--primary-color);border-radius:50%;width:60px;height:60px;animation:spin 1s linear infinite;margin:0 auto 30px}@keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}.results-section{padding:50px;display:none}.api-errors{background-color:#fff3cd;color:#856404;padding:20px;border-radius:12px;margin-bottom:30px;text-align:left;border:1px solid #ffeeba}.api-errors ul{padding-left:20px;margin:0}.products-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:30px;margin-top:40px}.product-card{background:var(--card-bg);border-radius:18px;box-shadow:0 12px 30px var(--shadow-light);overflow:hidden;border:1px solid #eee;display:flex;flex-direction:column;position:relative}.product-image{width:100%;height:220px;display:flex;align-items:center;justify-content:center;overflow:hidden}.product-image img{width:100%;height:100%;object-fit:cover}.product-info{padding:25px;display:flex;flex-direction:column;flex-grow:1;justify-content:space-between}.product-title{font-size:1.1em;font-weight:600;margin-bottom:12px;color:var(--text-color-dark)}.price-store-wrapper{display:flex;justify-content:space-between;align-items:center;margin-top:auto}.current-price{font-size:1.8em;font-weight:700;color:var(--accent-color)}.store-link a{font-weight:600;color:var(--primary-color);text-decoration:none}#image-preview-container{display:none;align-items:center;gap:20px;margin-top:20px}#image-preview{max-height:100px;border-radius:10px}#remove-image-btn{background:var(--accent-color);color:#fff;border:none;border-radius:50%;width:35px;height:35px;cursor:pointer}</style></head><body><div class="container"><header class="header"><h1>Smart Shopping Bot</h1><p>Hola, <strong>{{ user_name }}</strong>. Encuentra los mejores precios online. | <a href="{{ url_for('logout') }}">Cerrar Sesión</a></p></header><section class="search-section"><form id="search-form" class="search-form"><div class="input-group"><label for="query">¿Qué producto buscas?</label><input type="text" id="query" name="query" placeholder="Ej: cinta de pintor azul 2 pulgadas"></div><div class="input-group"><label for="image_file">... o sube una imagen para una búsqueda más precisa</label><input type="file" id="image_file" name="image_file" accept="image/*"><div id="image-preview-container"><img id="image-preview" src="#" alt="Previsualización"><button type="button" id="remove-image-btn" title="Eliminar imagen">×</button></div></div><button type="submit" id="search-btn" class="search-btn">Buscar Precios</button></form></section><div id="loading" class="loading"><div class="spinner"></div><p>Ejecutando motor de búsqueda exhaustiva...</p></div><section id="results-section" class="results-section"><div id="api-errors" class="api-errors" style="display:none;"></div><h2 id="results-title">Las Mejores Ofertas Encontradas</h2><div id="products-grid" class="products-grid"></div></section></div>
 <script>
     const searchForm = document.getElementById("search-form");
     const queryInput = document.getElementById("query");
@@ -298,14 +284,14 @@ SEARCH_TEMPLATE = """
             if (data.results && data.results.length > 0) {
                 document.getElementById("results-title").style.display = "block";
                 data.results.forEach(product => {
-                    const reasoning = product.relevance_reasoning.replace(/"/g, '"');
-                    const confidence = product.confidence_score.toFixed(2);
+                    const reasoning = product.reasoning.replace(/"/g, '"');
+                    const dealScore = product.deal_score.toFixed(2);
                     const originalPrice = `${product.original_price.toFixed(2)} ${product.original_currency}`;
                     productsGrid.innerHTML += `
                         <div class="product-card">
                             <div class="product-image"><img src="${product.image_url || 'https://via.placeholder.com/300'}" alt="${product.name}" onerror="this.onerror=null;this.src='https://via.placeholder.com/300';"></div>
                             <div class="product-info">
-                                <div class="product-title" title="IA Reasoning: ${reasoning}\nConfidence: ${confidence}">${product.name}</div>
+                                <div class="product-title" title="Deal Score: ${dealScore}\\nIA Reasoning: ${reasoning}">${product.name}</div>
                                 <div class="price-store-wrapper">
                                     <div class="current-price" title="Original: ${originalPrice}">$${product.price_in_usd.toFixed(2)}</div>
                                     <div class="store-link"><a href="${product.url}" target="_blank">Ver en ${product.store}</a></div>
@@ -316,7 +302,7 @@ SEARCH_TEMPLATE = """
             } else {
                 document.getElementById("results-title").style.display = "none";
                 if (!apiErrorsDiv.innerHTML) {
-                    productsGrid.innerHTML = "<p>No se encontraron resultados de alta precisión para tu búsqueda.</p>";
+                    productsGrid.innerHTML = "<p>No se encontraron ofertas de alta calidad para tu búsqueda.</p>";
                 }
             }
             resultsSection.style.display = "block";
