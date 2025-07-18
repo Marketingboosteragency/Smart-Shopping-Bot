@@ -171,7 +171,7 @@ class SmartShoppingBot:
 
         print(f"  🔥 Ejecutando {len(tasks)} tareas de búsqueda estratégicas en paralelo...")
         all_urls = set()
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=5) as executor: # MODIFICACIÓN: Reducir la concurrencia
             future_to_task = {executor.submit(self._run_search_task, **task): task for task in tasks}
             for future in as_completed(future_to_task):
                 for url in future.result(): all_urls.add(url)
