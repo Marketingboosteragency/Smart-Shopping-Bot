@@ -1,13 +1,11 @@
-# app.py (versión 25.0 - Motor de Búsqueda Avanzado por Oleadas)
+# app.py (versión 25.1 - Corrección de Error de Tipo None)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 25.0 (Advanced Wave-Based Search Engine)
+# Versión: 25.1 (NoneType Price Error Fix)
 # Novedades:
-# - BÚSQUEDA POR OLEADAS: Se implementa una estrategia de búsqueda en cascada con múltiples consultas, desde alta precisión hasta búsqueda en tiendas de nicho.
-# - ANÁLISIS DE IA MEJORADO: El prompt de Gemini es ahora más estricto y está diseñado para buscar señales de buenas ofertas.
-# - PUNTUACIÓN DE OFERTA: Los resultados finales se ordenan por un puntaje que combina alta relevancia y bajo precio, en lugar de solo por precio.
-# - CONOCIMIENTO DE TIENDAS: El bot ahora tiene listas de tiendas prioritarias, de hogar y de descuento para búsquedas más dirigidas.
+# - CÓDIGO ROBUSTO: Se añade una validación para manejar casos donde la IA no encuentra un precio (devuelve None), evitando que la aplicación falle.
+# - MANEJO DE EXCEPCIONES: Se implementa un bloque try-except para la conversión de precios, haciendo el procesamiento de datos más resistente a valores inesperados.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -140,7 +138,7 @@ def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         analysis = json.loads(response.text)
         if not all(k in analysis for k in ["price", "currency", "relevance_score", "price_accuracy_score", "is_usa_centric"]): return default_failure
-        print(f"  🧠 Calificación IA: Relevancia={analysis['relevance_score']}/10, Precisión={analysis['price_accuracy_score']}/10, Precio={analysis['price']} {analysis['currency']}, USA?={analysis['is_usa_centric']}")
+        print(f"  🧠 Calificación IA: Relevancia={analysis['relevance_score']}/10, Precisión={analysis['price_accuracy_score']}/10, Precio={analysis.get('price')} {analysis.get('currency')}, USA?={analysis.get('is_usa_centric')}")
         return analysis
     except (json.JSONDecodeError, google_exceptions.ResourceExhausted, ValueError) as e:
         if isinstance(e, google_exceptions.ResourceExhausted): errors_list.append("Advertencia: Cuota de API superada durante el análisis.")
@@ -161,7 +159,6 @@ class SmartShoppingBot:
         except Exception as e:
             print(f"❌ ERROR al inicializar el servicio de Búsqueda de Google: {e}")
         
-        # ¡NUEVO! Listas de tiendas especializadas
         self.high_priority_stores = ["amazon.com", "walmart.com", "ebay.com", "target.com", "bestbuy.com"]
         self.home_improvement_stores = ["homedepot.com", "lowes.com", "acehardware.com", "harborfreight.com"]
         self.discount_retailers = ["overstock.com", "wayfair.com", "newegg.com", "bhphotovideo.com"]
@@ -206,18 +203,29 @@ class SmartShoppingBot:
             future_to_candidate = {executor.submit(_get_ai_analysis, c, original_query, errors_list): c for c in candidates_for_judgement}
             for future in as_completed(future_to_candidate):
                 candidate_data, analysis = future_to_candidate[future], future.result()
-                if analysis.get('is_usa_centric', False) and analysis.get('relevance_score', 0) >= 6 and analysis.get('price_accuracy_score', 0) >= 5:
+                
+                # ¡CORREGIDO! Se añade una validación para manejar precios nulos.
+                extracted_price = analysis.get('price')
+                if analysis.get('is_usa_centric', False) and analysis.get('relevance_score', 0) >= 6 and analysis.get('price_accuracy_score', 0) >= 5 and extracted_price is not None:
                     currency = analysis.get('currency', 'USD').upper(); rate = CURRENCY_RATES_TO_USD.get(currency)
                     if rate:
-                        original_price = float(analysis.get('price', 99999)); price_in_usd = original_price * rate
-                        if price_in_usd >= 0.50:
-                            analyzed_products.append(ProductResult(
-                                name=candidate_data['title'], store=urlparse(candidate_data['url']).netloc.replace('www.', '').split('.')[0].capitalize(),
-                                url=candidate_data['url'], image_url=candidate_data['image'],
-                                price_in_usd=price_in_usd, original_price=original_price, original_currency=currency,
-                                relevance_score=analysis['relevance_score'], price_accuracy_score=analysis['price_accuracy_score'], 
-                                reasoning=analysis.get('reasoning', ''), is_alternative_suggestion=is_fallback
-                            ))
+                        try:
+                            # Se usa un bloque try-except para una conversión segura
+                            original_price = float(extracted_price)
+                            price_in_usd = original_price * rate
+                            if price_in_usd >= 0.50:
+                                analyzed_products.append(ProductResult(
+                                    name=candidate_data['title'], store=urlparse(candidate_data['url']).netloc.replace('www.', '').split('.')[0].capitalize(),
+                                    url=candidate_data['url'], image_url=candidate_data['image'],
+                                    price_in_usd=price_in_usd, original_price=original_price, original_currency=currency,
+                                    relevance_score=analysis['relevance_score'], price_accuracy_score=analysis['price_accuracy_score'], 
+                                    reasoning=analysis.get('reasoning', ''), is_alternative_suggestion=is_fallback
+                                ))
+                        except (ValueError, TypeError):
+                            # Si la conversión falla, se ignora el resultado silenciosamente.
+                            print(f"  ⚠️  Precio inválido '{extracted_price}' para '{candidate_data['title']}'. Omitiendo.")
+                            pass
+
         return analyzed_products
 
     def search_product(self, query: str = None, image_content: bytes = None) -> Tuple[List[ProductResult], List[str], List[str]]:
@@ -250,30 +258,22 @@ class SmartShoppingBot:
             urls = self._run_single_search_task(store_query, start=1)
             for url in urls: all_urls.add(url)
             
-            # Procesamos los resultados iniciales para ver si son suficientes
             final_results = self._process_and_validate_candidates(list(all_urls), original_query, errors_list)
 
             # OLEADA 3: Búsqueda expandida (si no tenemos suficientes resultados)
             if len(final_results) < self.MINIMUM_RESULTS_TARGET:
                 print(f"--- OLEADA 3: Expandiendo a Búsqueda Amplia y de Descuento ---")
-                
-                # Búsquedas con palabras clave de ofertas
-                queries_wave_3 = [
-                    f'{enhanced_query} sale',
-                    f'{enhanced_query} discount'
-                ]
+                queries_wave_3 = [ f'{enhanced_query} sale', f'{enhanced_query} discount' ]
                 for q in queries_wave_3:
                     urls = self._run_single_search_task(q, start=1)
                     for url in urls: all_urls.add(url)
                 
-                # Búsqueda en tiendas de nicho y de descuento
                 niche_stores = self.home_improvement_stores + self.discount_retailers
                 niche_query_part = " OR ".join([f"site:{store}" for store in niche_stores])
                 niche_query = f'({niche_query_part}) "{enhanced_query}"'
                 urls = self._run_single_search_task(niche_query, start=1)
                 for url in urls: all_urls.add(url)
 
-                # Volvemos a procesar con el conjunto completo de URLs
                 final_results = self._process_and_validate_candidates(list(all_urls), original_query, errors_list)
 
             # OLEADA 4: Búsqueda Flexible (FALLBACK)
@@ -290,9 +290,7 @@ class SmartShoppingBot:
                 print("✅ BÚSQUEDA COMPLETA. No se encontraron ofertas de alta calidad.")
                 return [], [], errors_list
             
-            # ¡NUEVO! Clasificación por "Puntaje de Oferta"
-            # Esta fórmula prioriza la alta relevancia y penaliza el precio alto.
-            # Se eleva al cuadrado la relevancia para darle más peso.
+            # Clasificación por "Puntaje de Oferta"
             final_results = sorted(final_results, key=lambda p: ( (p.relevance_score ** 2) / p.price_in_usd if p.price_in_usd > 0 else 0), reverse=True)
             
             print(f"✅ BÚSQUEDA COMPLETA. Se encontraron {len(final_results)} ofertas de calidad, ordenadas por el mejor puntaje.")
