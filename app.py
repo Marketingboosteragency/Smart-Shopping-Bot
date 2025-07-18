@@ -1,13 +1,12 @@
-# app.py (versión 22.0 - Motor de Búsqueda Estratégica y Controlada)
+# app.py (versión 23.0 - Motor de Búsqueda Secuencial y Priorizada)
 
 # ==============================================================================
 # SMART SHOPPING BOT - APLICACIÓN COMPLETA CON FIREBASE
-# Versión: 22.0 (Strategic & Throttled Search Engine)
+# Versión: 23.0 (Sequential & Prioritized Search Engine)
 # Novedades:
-# - CORRECCIÓN DE ERROR 429: Se rediseñó la recolección de datos para evitar ser bloqueado por la API de SerpApi.
-# - BÚSQUEDA EN TIENDAS CONSOLIDADA: En lugar de una llamada por tienda, ahora se usa una única y potente consulta para buscar en todas las tiendas prioritarias a la vez.
-# - REDUCCIÓN DE TAREAS Y CONTROL DE CONCURRENCIA: Se ha reducido drásticamente el número de búsquedas paralelas a un nivel seguro y eficiente.
-# - MANTIENE LA LÓGICA DE FALLBACK: El sistema sigue siendo resiliente y puede realizar una búsqueda flexible si el primer intento falla.
+# - CORRECCIÓN DEFINITIVA DE ERROR 429: Se reemplaza la búsqueda masiva en paralelo por una cascada secuencial y priorizada para respetar los límites de la API.
+# - BÚSQUEDA EFICIENTE: El bot ahora busca primero en la fuente más probable (Google Shopping) y solo expande la búsqueda si es necesario, ahorrando llamadas a la API.
+# - ARQUITECTURA ROBUSTA: Se mantiene el motor de producción endurecido y la lógica de fallback, ahora activada de forma más inteligente.
 # ==============================================================================
 
 # --- IMPORTS DE LIBRERÍAS ---
@@ -97,7 +96,7 @@ def _get_fallback_query_from_ai(original_query: str, errors_list: List[str]) -> 
     print(f"  🤔 La búsqueda precisa de '{original_query}' falló. Generando una consulta flexible...")
     try:
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = f"A search for '{original_query}' yielded no results. Generate a single, slightly broader but still relevant search query in English that is likely to find similar products. Respond ONLY with the new query."
+        prompt = f"A search for '{original_query}' yielded no results. Generate a single, slightly broader but still relevant English query that is likely to find similar products. Respond ONLY with the new query."
         response = model.generate_content(prompt)
         fallback_query = response.text.strip()
         print(f"  💡 Consulta flexible generada: '{fallback_query}'")
@@ -137,14 +136,15 @@ def _get_ai_analysis(candidate: Dict[str, Any], original_query: str, errors_list
 class SmartShoppingBot:
     def __init__(self, serpapi_key: str):
         self.serpapi_key = serpapi_key
-        self.TOP_N_CANDIDATES_TO_VALIDATE = 50
-        self.MAX_RESULTS_TO_RETURN = 40
+        self.MAX_RESULTS_TO_RETURN = 30
+        self.MINIMUM_RESULTS_TARGET = 10
 
-    def _run_search_task(self, query: str, engine: str, start: int = 0) -> List[str]:
+    def _run_single_search_task(self, query: str, engine: str, start: int = 0) -> List[str]:
         urls = []
         params = {"q": query, "engine": engine, "location": "United States", "gl": "us", "hl": "en", "api_key": self.serpapi_key, "start": start}
         if engine == "google": params["num"] = "10"
         try:
+            print(f"  📡 Ejecutando búsqueda: Engine={engine}, Query='{query[:50]}...'")
             response = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
             response.raise_for_status()
             results = response.json().get('organic_results', []) if engine == "google" else response.json().get('shopping_results', [])
@@ -152,34 +152,10 @@ class SmartShoppingBot:
                 if isinstance(item, dict) and item.get('link'): urls.append(item['link'])
         except Exception as e: print(f"❌ Error en sub-búsqueda ({engine}): {e}")
         return urls
-
-    def get_candidate_urls_strategically(self, base_query: str, original_query: str) -> List[str]:
-        print("--- FASE 1: Iniciando Búsqueda Estratégica de Candidatos ---")
-        tasks = []
-        high_priority_stores = ["amazon.com", "walmart.com", "ebay.com", "target.com", "homedepot.com", "lowes.com", "grainger.com", "uline.com", "zoro.com"]
-        
-        # Búsqueda Consolidada en Tiendas (1 Tarea)
-        store_query_part = " OR ".join([f"site:{store}" for store in high_priority_stores])
-        store_query = f"({store_query_part}) \"{original_query}\""
-        tasks.append({"query": store_query, "engine": "google", "start": 0})
-
-        # Búsqueda Orgánica (2 Tareas)
-        for i in range(2): tasks.append({"query": base_query, "engine": "google", "start": i * 10})
-        
-        # Búsqueda en Google Shopping (1 Tarea)
-        tasks.append({"query": base_query, "engine": "google_shopping", "start": 0})
-
-        print(f"  🔥 Ejecutando {len(tasks)} tareas de búsqueda estratégicas en paralelo...")
-        all_urls = set()
-        with ThreadPoolExecutor(max_workers=5) as executor: # MODIFICACIÓN: Reducir la concurrencia
-            future_to_task = {executor.submit(self._run_search_task, **task): task for task in tasks}
-            for future in as_completed(future_to_task):
-                for url in future.result(): all_urls.add(url)
-        return list(all_urls)
     
     def _process_and_validate_candidates(self, candidate_urls: List[str], original_query: str, errors_list: List[str], is_fallback: bool = False) -> List[ProductResult]:
         blacklist = ['pinterest.com', 'youtube.com', 'wikipedia.org', 'facebook.com']
-        filtered_urls = [url for url in candidate_urls if not any(site in url for site in blacklist)]
+        filtered_urls = list(set([url for url in candidate_urls if not any(site in url for site in blacklist)]))
         
         print(f"--- {len(filtered_urls)} URLs candidatas pasarán a la fase de scrape y juicio. ---")
         if not filtered_urls: return []
@@ -216,15 +192,41 @@ class SmartShoppingBot:
             enhanced_query = _enhance_query_for_purchase(original_query, errors_list)
             if not enhanced_query: return [], ["No se pudo generar una consulta válida."], errors_list
             
-            candidate_urls = self.get_candidate_urls_strategically(enhanced_query, original_query)
-            final_results = self._process_and_validate_candidates(candidate_urls, original_query, errors_list)
+            # --- BÚSQUEDA SECUENCIAL Y PRIORIZADA ---
+            all_urls = set()
+            
+            # Intento 1: Google Shopping (La mejor fuente)
+            print("--- Iniciando Búsqueda Priorizada: Google Shopping ---")
+            urls = self._run_single_search_task(enhanced_query, "google_shopping")
+            for url in urls: all_urls.add(url)
+            
+            final_results = self._process_and_validate_candidates(list(all_urls), original_query, errors_list)
 
+            # Si no tenemos suficientes resultados, expandimos la búsqueda
+            if len(final_results) < self.MINIMUM_RESULTS_TARGET:
+                print(f"--- Menos de {self.MINIMUM_RESULTS_TARGET} resultados. Expandiendo búsqueda... ---")
+                
+                # Búsqueda Orgánica
+                for i in range(2): # 2 páginas
+                    urls = self._run_single_search_task(enhanced_query, "google", start=i * 10)
+                    for url in urls: all_urls.add(url)
+
+                # Búsqueda Consolidada en Tiendas
+                high_priority_stores = ["amazon.com", "walmart.com", "ebay.com", "target.com", "homedepot.com", "lowes.com"]
+                store_query_part = " OR ".join([f"site:{store}" for store in high_priority_stores])
+                store_query = f"({store_query_part}) \"{original_query}\""
+                urls = self._run_single_search_task(store_query, "google")
+                for url in urls: all_urls.add(url)
+                
+                final_results = self._process_and_validate_candidates(list(all_urls), original_query, errors_list)
+
+            # --- INTENTO FINAL: BÚSQUEDA FLEXIBLE (FALLBACK) ---
             if not final_results:
-                print("--- Búsqueda de Alta Precisión sin resultados. Iniciando Búsqueda Flexible. ---")
+                print("--- Búsqueda principal sin resultados. Iniciando Búsqueda Flexible. ---")
                 fallback_query = _get_fallback_query_from_ai(original_query, errors_list)
                 if fallback_query:
-                    fallback_candidate_urls = self.get_candidate_urls_strategically(fallback_query, fallback_query)
-                    final_results = self._process_and_validate_candidates(fallback_candidate_urls, original_query, errors_list, is_fallback=True)
+                    fallback_urls = self._run_single_search_task(fallback_query, "google_shopping")
+                    final_results = self._process_and_validate_candidates(fallback_urls, original_query, errors_list, is_fallback=True)
                     if final_results:
                         errors_list.insert(0, "No encontramos resultados exactos. Pero aquí hay algunas opciones similares que podrían interesarte.")
 
